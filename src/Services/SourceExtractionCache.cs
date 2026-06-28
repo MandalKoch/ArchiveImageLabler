@@ -13,7 +13,23 @@ public sealed class SourceExtractionCache(
     ILogger<SourceExtractionCache> logger)
 {
     private readonly ConcurrentDictionary<string, SourceExtractionSession> _sessions = new(StringComparer.Ordinal);
+    private readonly string _cachePath = Path.Combine(options.Value.DataPath, "cache");
     private readonly string _rootPath = Path.Combine(options.Value.DataPath, "cache", "source-pages");
+
+    public async Task ClearAsync(CancellationToken cancellationToken = default)
+    {
+        _sessions.Clear();
+
+        await Task.Run(() =>
+        {
+            if (Directory.Exists(_cachePath))
+            {
+                Directory.Delete(_cachePath, recursive: true);
+            }
+
+            Directory.CreateDirectory(_rootPath);
+        }, cancellationToken);
+    }
 
     public async Task<SourceExtractionSessionSummary> ExtractAsync(
         long containerId,

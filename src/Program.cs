@@ -50,6 +50,8 @@ var app = builder.Build();
 
 app.MapDefaultEndpoints();
 
+await app.Services.GetRequiredService<SourceExtractionCache>().ClearAsync();
+
 using (var scope = app.Services.CreateScope())
 {
     var dbFactory = scope.ServiceProvider.GetRequiredService<IDbContextFactory<LibraryDbContext>>();
