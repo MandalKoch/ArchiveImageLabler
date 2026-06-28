@@ -1,0 +1,1378 @@
+@page "/"
+@rendermode InteractiveServer
+@inject LibraryScanner Scanner
+@inject LibraryQueries Library
+@inject IOptions<LibraryOptions> Options
+@inject IJSRuntime JsRuntime
+@implements IAsyncDisposable
+
+<PageTitle>FileZipPreview</PageTitle>
+
+<div class="shell">
+    <header class="app-header">
+        <div>
+            <p class="eyebrow">Mounted library</p>
+            <h1>FileZipPreview</h1>
+            <p class="path">@Options.Value.RootPath</p>
+        </div>
+
+        <div class="toolbar">
+            <MemoryUsage />
+            <button class="@LabelAffeButtonClass" @onclick="ToggleLabelAffeAsync">
+                @(_labelAffeMode ? "Exit LabelAffe" : "LabelAffe")
+            </button>
+            <button class="primary-button" @onclick="ScanAsync" disabled="@_isScanning" title="Refresh folders, keep archive previews, and prune missing entries. Full archive scans happen when opening an archive.">
+                @(_isScanning ? _scanStatus : "Scan")
+            </button>
+            <button class="danger-button" @onclick="RescanAsync" disabled="@_isScanning" title="Delete indexed assets, including tags, ratings, and descriptions, then run a fast scan">
+                Rescan
+            </button>
+            @if (_isScanning)
+            {
+                <button class="secondary-button" @onclick="CancelRootScan">Cancel</button>
+            }
+        </div>
+    </header>
+
+    <section class="stats-band">
+        <div><span>@(_snapshot?.Totals.Images ?? 0)</span><label>Media</label></div>
+        <div><span>@(_snapshot?.Totals.Archives ?? 0)</span><label>Archives</label></div>
+        <div><span>@(_snapshot?.Totals.Missing ?? 0)</span><label>Missing</label></div>
+        <div><span>@(_snapshot?.Totals.Errors ?? 0)</span><label>Errors</label></div>
+    </section>
+
+    @if (_lastScan is not null)
+    {
+        <div class="scan-note">
+            Indexed @_lastScan.Images media files and @_lastScan.Containers containers. Removed @_lastScan.Pruned database entries. @_lastScan.Errors scan errors.
+        </div>
+    }
+    else if (!string.IsNullOrWhiteSpace(_scanMessage))
+    {
+        <div class="scan-note">
+            @_scanMessage
+        </div>
+    }
+
+    @if (_isScanning && _folderScanProgress is not null)
+    {
+        <section class="progress-panel">
+            <div>
+                <strong>@_folderScanProgress.Phase</strong>
+                <span>@_folderScanProgress.CurrentItem</span>
+            </div>
+            <div class="progress-bar"><span></span></div>
+            <small>@_folderScanProgress.Images media files · @_folderScanProgress.Containers containers · @_folderScanProgress.Errors errors</small>
+        </section>
+    }
+
+    @if (_isArchiveScanning && _archiveScanProgress is not null)
+    {
+        <section class="progress-panel archive-progress">
+            <div>
+                <strong>@_archiveScanProgress.Phase</strong>
+                <span>@_archiveScanProgress.CurrentItem</span>
+            </div>
+            <div class="progress-bar"><span></span></div>
+            <small>@_archiveScanProgress.Images media files found · @_archiveScanProgress.Errors errors</small>
+            <button class="secondary-button" @onclick="CancelArchiveScan">Cancel</button>
+        </section>
+    }
+
+    <section class="filters">
+        <input placeholder="Search names, tags, descriptions" @bind="_search" @bind:event="oninput" />
+        <select @bind="_ratingFilter">
+            <option value="">Any rating</option>
+            <option value="5">5 stars</option>
+            <option value="4">4 stars</option>
+            <option value="3">3 stars</option>
+            <option value="2">2 stars</option>
+            <option value="1">1 star</option>
+        </select>
+        <label class="check">
+            <input type="checkbox" @bind="_unratedOnly" />
+            Unrated
+        </label>
+        <button class="secondary-button" @onclick="LoadAsync">Apply</button>
+    </section>
+
+    @if (_snapshot is null)
+    {
+        <div class="empty-state">
+            <h2>No scan loaded</h2>
+            <p>@Options.Value.RootPath</p>
+        </div>
+    }
+    else
+    {
+        @if (_labelAffeMode)
+        {
+            <section class="labelaffe-workspace">
+                <aside class="labelaffe-list">
+                    <div class="panel-title">
+                        <span>Archives</span>
+                        <small>@LabelArchives().Count() items</small>
+                    </div>
+
+                    @foreach (var archive in LabelArchives())
+                    {
+                        <button class="labelaffe-archive @(archive.Id == _labelArchiveId ? "active" : null)" @onclick="() => SelectLabelArchiveAsync(archive)">
+                            <Preview AssetId="archive.PreviewImageId" AssetKind="archive.PreviewKind" />
+                            <span>
+                                <strong>@archive.DisplayName</strong>
+                                @if (!string.IsNullOrWhiteSpace(archive.LabelName))
+                                {
+                                    <small>@archive.Name</small>
+                                }
+                                <small>@archive.Tags</small>
+                            </span>
+                        </button>
+                    }
+                </aside>
+
+                <section class="labelaffe-editor">
+                    @if (SelectedLabelArchive is null)
+                    {
+                        <div class="empty-state inline">
+                            <h2>No archive selected</h2>
+                        </div>
+                    }
+                    else
+                    {
+                        var archive = SelectedLabelArchive!;
+                        <div class="panel-heading">
+                            <div>
+                                <p class="eyebrow">LabelAffe</p>
+                                <h2>@archive.DisplayName</h2>
+                                <p class="path dark">@archive.RelativePath</p>
+                            </div>
+                            <Preview AssetId="archive.PreviewImageId" AssetKind="archive.PreviewKind" />
+                        </div>
+
+                        <div class="labelaffe-form">
+                            <label class="field flush">
+                                <span>Archive name</span>
+                                <input @bind="_labelName" list="label-name-suggestions" placeholder="@archive.Name" />
+                            </label>
+
+                            <div class="suggestion-row">
+                                @foreach (var suggestion in NameSuggestions(archive).Take(8))
+                                {
+                                    <button class="suggestion-chip" @onclick="() => ApplyNameSuggestion(suggestion)">@suggestion</button>
+                                }
+                            </div>
+
+                            <label class="field flush">
+                                <span>Add tags</span>
+                                <div class="tag-entry">
+                                    <input @bind="_labelTagInput" @bind:event="oninput" @onkeyup="HandleLabelTagKeyUp" list="tag-suggestions" placeholder="type tag and press Enter" />
+                                    <button class="secondary-button" @onclick="AddLabelTagFromInput">Add</button>
+                                </div>
+                            </label>
+
+                            <div class="assigned-tags">
+                                <span>Current tags</span>
+                                @if (_labelTags.Count == 0)
+                                {
+                                    <small>No tags assigned</small>
+                                }
+                                else
+                                {
+                                    <div class="tag-chip-row">
+                                        @foreach (var tag in _labelTags)
+                                        {
+                                            <button class="tag-chip selected" title="Remove @tag" @onclick="() => RemoveLabelTag(tag)">
+                                                <span>@tag</span>
+                                                <strong aria-hidden="true">x</strong>
+                                            </button>
+                                        }
+                                    </div>
+                                }
+                            </div>
+
+                            <div class="suggestion-row">
+                                @foreach (var suggestion in TagSuggestions(archive).Take(16))
+                                {
+                                    <button class="suggestion-chip" @onclick="() => AddLabelTag(suggestion)">@suggestion</button>
+                                }
+                            </div>
+
+                            <label class="field flush">
+                                <span>Description</span>
+                                <textarea @bind="_labelDescription" rows="5"></textarea>
+                            </label>
+
+                            <div class="suggestion-row">
+                                @foreach (var suggestion in TextSuggestions(archive).Take(6))
+                                {
+                                    <button class="suggestion-chip text" @onclick="() => ApplyTextSuggestion(suggestion)">@suggestion</button>
+                                }
+                            </div>
+
+                            <label class="field flush compact-field">
+                                <span>Rating</span>
+                                <select @bind="_labelRating">
+                                    <option value="">Unrated</option>
+                                    <option value="5">5 stars</option>
+                                    <option value="4">4 stars</option>
+                                    <option value="3">3 stars</option>
+                                    <option value="2">2 stars</option>
+                                    <option value="1">1 star</option>
+                                </select>
+                            </label>
+
+                            <div class="drawer-actions flush">
+                                <button class="primary-button" @onclick="SaveLabelAffeAsync">Save</button>
+                                <button class="secondary-button" @onclick="SaveAndNextLabelAffeAsync">Save and next</button>
+                            </div>
+                        </div>
+                    }
+                </section>
+            </section>
+
+            <datalist id="label-name-suggestions">
+                @foreach (var suggestion in _labelSuggestions.Names)
+                {
+                    <option value="@suggestion"></option>
+                }
+            </datalist>
+
+            <datalist id="tag-suggestions">
+                @foreach (var suggestion in _labelSuggestions.Tags)
+                {
+                    <option value="@suggestion"></option>
+                }
+            </datalist>
+        }
+        else
+        {
+            <section class="workspace">
+            <aside class="source-list">
+                <div class="panel-title">
+                    <span>Sources</span>
+                    <label class="sidebar-toggle">
+                        <input type="checkbox" @bind="_showArchivesOnly" />
+                        Archives
+                    </label>
+                </div>
+
+                @foreach (var container in VisibleContainers())
+                {
+                    var hasChildren = !_showArchivesOnly && HasSourceChildren(container);
+                    <div class="source-tree-row" style="@SourceIndent(container, _showArchivesOnly)">
+                        <button class="source-toggle @(hasChildren ? null : "hidden")" title="@(IsSourceCollapsed(container.Id) ? "Expand" : "Collapse")" disabled="@(!hasChildren)" @onclick="() => ToggleSourceCollapsed(container.Id)">
+                            @(IsSourceCollapsed(container.Id) ? ">" : "v")
+                        </button>
+                        <button class="source-card @(container.Id == _snapshot.ActiveContainerId ? "active" : null) @(container.IsIgnored ? "ignored" : null)" @onclick="() => SelectContainerAsync(container.Id)">
+                            <Preview AssetId="container.PreviewImageId" AssetKind="container.PreviewKind" />
+                            <span class="source-copy">
+                                <strong>@container.DisplayName</strong>
+                                <small>@DisplaySourceType(container)</small>
+                                <small>@SourceStatus(container)</small>
+                            </span>
+                            <span class="stars">@StatusBadge(container)</span>
+                        </button>
+                    </div>
+                }
+            </aside>
+
+            <section class="preview-panel">
+                <div class="panel-heading">
+                    <div>
+                        <p class="eyebrow">Preview</p>
+                        <h2>@SelectedContainerName</h2>
+                    </div>
+                    <div class="panel-actions">
+                        @if (SelectedContainer is not null)
+                        {
+                            <button class="icon-button" title="Edit metadata" @onclick="() => EditAsset(SelectedContainer)">Edit</button>
+                            @if (SelectedContainer.Kind == AssetKinds.Zip)
+                            {
+                                <button class="secondary-button" @onclick="() => ToggleIgnoredAsync(SelectedContainer)">
+                                    @(SelectedContainer.IsIgnored ? "Unignore" : "Ignore")
+                                </button>
+                            }
+                            <a class="secondary-button" href="@SourcePageUrl(SelectedContainer.Id)" target="_blank" rel="noopener">Open page</a>
+                        }
+                    </div>
+                </div>
+
+                <ImageGrid Archives="_snapshot.Archives" Images="_snapshot.Images" OnOpen="OpenViewer" OnOpenArchive="OpenArchiveFromPreviewAsync" />
+            </section>
+            </section>
+        }
+    }
+</div>
+
+@if (_editingAsset is not null)
+{
+    <div class="drawer">
+        <div class="drawer-panel">
+            <div class="panel-heading compact">
+                <div>
+                    <p class="eyebrow">@_editingAsset.Kind</p>
+                    <h2>@_editingAsset.DisplayName</h2>
+                </div>
+                <button class="icon-button" title="Close" @onclick="CloseEditor">x</button>
+            </div>
+
+            @if (_editingAsset.PreviewImageId is not null)
+            {
+                @if (_editingAsset.PreviewKind == AssetKinds.Video)
+                {
+                    <video class="viewer-image" src="@ImageUrl(_editingAsset.PreviewImageId.Value)#t=0.1" controls preload="metadata" muted loop></video>
+                }
+                else
+                {
+                    <img class="viewer-image" src="@ImageUrl(_editingAsset.PreviewImageId.Value)" alt="@_editingAsset.DisplayName" />
+                }
+            }
+
+            <label class="field">
+                <span>Label name</span>
+                <input @bind="_editLabelName" list="label-name-suggestions" placeholder="@_editingAsset.Name" />
+            </label>
+
+            <label class="field">
+                <span>Rating</span>
+                <select @bind="_editRating">
+                    <option value="">Unrated</option>
+                    <option value="5">5 stars</option>
+                    <option value="4">4 stars</option>
+                    <option value="3">3 stars</option>
+                    <option value="2">2 stars</option>
+                    <option value="1">1 star</option>
+                </select>
+            </label>
+
+            <label class="field">
+                <span>Tags</span>
+                <input @bind="_editTags" placeholder="portrait, reference, favorite" />
+            </label>
+
+            <label class="field">
+                <span>Description</span>
+                <textarea @bind="_editDescription" rows="5"></textarea>
+            </label>
+
+            <div class="drawer-actions">
+                <button class="primary-button" @onclick="SaveMetadataAsync">Save</button>
+                <button class="secondary-button" @onclick="CloseEditor">Cancel</button>
+            </div>
+        </div>
+    </div>
+}
+
+@if (_viewerAsset is not null)
+{
+    <div class="viewer">
+        <button class="viewer-backdrop" title="Close viewer" @onclick="CloseViewer"></button>
+        <div class="viewer-panel">
+            <header class="viewer-topbar">
+                <div>
+                    <p class="eyebrow">@DisplaySourceType(_viewerAsset)</p>
+                    <h2>@_viewerAsset.DisplayName</h2>
+                </div>
+                <div class="viewer-controls">
+                    <button class="secondary-button" @onclick="PreviousImage">Previous</button>
+                    <button class="secondary-button" @onclick="NextImage">Next</button>
+                    <button class="primary-button" @onclick="() => EditAsset(_viewerAsset)">Edit</button>
+                    <button class="icon-button" title="Close" @onclick="CloseViewer">x</button>
+                </div>
+            </header>
+            <div class="viewer-stage">
+                @ViewerMedia(_viewerAsset)
+            </div>
+            <footer class="viewer-filmstrip">
+                <div class="viewer-meta-line">
+                    <span class="muted">@_viewerAsset.RelativePath</span>
+                    <span class="stars">@StatusBadge(_viewerAsset)</span>
+                    @if (!string.IsNullOrWhiteSpace(_viewerAsset.Tags))
+                    {
+                        <span class="tags">@_viewerAsset.Tags</span>
+                    }
+                </div>
+                <div class="filmstrip-row">
+                    @foreach (var image in CurrentImages())
+                    {
+                        <button @key="image.Id" class="filmstrip-item @(image.Id == _viewerAsset.Id ? "active" : null)" title="@image.DisplayName" @onclick="() => ShowViewerImageAsync(image)">
+                            @FilmstripMedia(image)
+                        </button>
+                    }
+                </div>
+            </footer>
+        </div>
+    </div>
+}
+
+@code {
+    private LibrarySnapshot? _snapshot;
+    private ScanSummary? _lastScan;
+    private string? _scanMessage;
+    private string _search = string.Empty;
+    private string _ratingFilter = string.Empty;
+    private bool _unratedOnly;
+    private bool _isScanning;
+    private string _scanStatus = "Scanning";
+    private bool _isArchiveScanning;
+    private bool _isRefreshingArchivePreview;
+    private ScanProgress? _folderScanProgress;
+    private ScanProgress? _archiveScanProgress;
+    private DateTimeOffset _lastArchivePreviewRefresh = DateTimeOffset.MinValue;
+    private int _lastArchivePreviewImageCount;
+    private AssetCard? _editingAsset;
+    private AssetCard? _viewerAsset;
+    private string _editLabelName = string.Empty;
+    private string _editDescription = string.Empty;
+    private string _editTags = string.Empty;
+    private int? _editRating;
+    private DotNetObjectReference<Home>? _keyboardReference;
+    private bool _keyboardConnected;
+    private bool _labelKeyboardConnected;
+    private CancellationTokenSource? _rootScanCancellation;
+    private CancellationTokenSource? _archiveScanCancellation;
+    private readonly HashSet<long> _collapsedSourceIds = [];
+    private bool _showArchivesOnly;
+    private bool _labelAffeMode;
+    private long? _labelArchiveId;
+    private string _labelName = string.Empty;
+    private string _labelDescription = string.Empty;
+    private string _labelTagInput = string.Empty;
+    private readonly List<string> _labelTags = [];
+    private int? _labelRating;
+    private LabelSuggestions _labelSuggestions = new([], [], []);
+
+    private AssetCard? SelectedContainer => _snapshot?.Containers.SingleOrDefault(container => container.Id == _snapshot.ActiveContainerId);
+
+    private string SelectedContainerName => SelectedContainer?.DisplayName ?? "Select a source";
+
+    private AssetCard? SelectedLabelArchive => LabelArchives().FirstOrDefault(archive => archive.Id == _labelArchiveId) ?? LabelArchives().FirstOrDefault();
+
+    private string LabelAffeButtonClass => _labelAffeMode ? "secondary-button active-mode" : "secondary-button";
+
+    protected override async Task OnInitializedAsync()
+    {
+        await LoadAsync();
+    }
+
+    private async Task ScanAsync()
+    {
+        await RunRootScanAsync("Scanning", (progress, cancellationToken) => Scanner.ScanAsync(progress, cancellationToken));
+    }
+
+    private async Task RescanAsync()
+    {
+        await ClearUiForRescanAsync();
+
+        await RunRootScanAsync("Rescanning", (progress, cancellationToken) => Scanner.RescanAsync(progress, cancellationToken));
+    }
+
+    private async Task RunRootScanAsync(string status, Func<IProgress<ScanProgress>, CancellationToken, Task<ScanSummary>> scanOperation)
+    {
+        _isScanning = true;
+        _scanStatus = status;
+        _scanMessage = null;
+        _lastScan = null;
+        _rootScanCancellation?.Dispose();
+        _rootScanCancellation = new CancellationTokenSource();
+        var cancellationToken = _rootScanCancellation.Token;
+        _folderScanProgress = new ScanProgress(status, Options.Value.RootPath, 0, 0, 0);
+        var progress = new Progress<ScanProgress>(value =>
+        {
+            _folderScanProgress = value;
+            _ = InvokeAsync(async () =>
+            {
+                if (value.Phase == "Fast scan complete")
+                {
+                    await LoadAsync();
+                    return;
+                }
+
+                StateHasChanged();
+            });
+        });
+
+        try
+        {
+            _lastScan = await Task.Run(async () => await scanOperation(progress, cancellationToken), cancellationToken);
+            await LoadAsync();
+        }
+        catch (OperationCanceledException)
+        {
+            _scanMessage = $"{status} cancelled.";
+            await LoadAsync();
+        }
+        finally
+        {
+            _isScanning = false;
+            _folderScanProgress = null;
+            _rootScanCancellation?.Dispose();
+            _rootScanCancellation = null;
+        }
+    }
+
+    private void CancelRootScan()
+    {
+        _scanStatus = "Cancelling";
+        _rootScanCancellation?.Cancel();
+    }
+
+    private async Task LoadAsync()
+    {
+        _snapshot = await Library.GetSnapshotAsync(_snapshot?.ActiveContainerId, _search, SelectedRating, _unratedOnly);
+        PruneCollapsedSources();
+        EnsureLabelArchiveSelected();
+    }
+
+    private async Task ToggleLabelAffeAsync()
+    {
+        _labelAffeMode = !_labelAffeMode;
+        if (!_labelAffeMode)
+        {
+            await DisconnectLabelAffeKeyboardAsync();
+            return;
+        }
+
+        _showArchivesOnly = true;
+        if (_snapshot is null)
+        {
+            await LoadAsync();
+        }
+
+        _labelSuggestions = await Library.GetLabelSuggestionsAsync();
+        SelectLabelArchive(SelectedContainer?.Kind == AssetKinds.Zip ? SelectedContainer : SelectedLabelArchive);
+        await ConnectLabelAffeKeyboardAsync();
+        await ScrollActiveLabelArchiveAsync();
+    }
+
+    private async Task SelectContainerAsync(long id)
+    {
+        await ClearLoadedImagesAsync(id);
+        _snapshot = await Library.GetSnapshotAsync(id, _search, SelectedRating, _unratedOnly);
+        if (SelectedContainer is { Kind: AssetKinds.Zip } container && ShouldScanArchive(container))
+        {
+            await ScanArchiveAsync(container);
+        }
+    }
+
+    private async Task OpenArchiveFromPreviewAsync(AssetCard archive)
+    {
+        ExpandSourceAncestors(archive);
+        await SelectContainerAsync(archive.Id);
+    }
+
+    private async Task ScanArchiveAsync(AssetCard container)
+    {
+        if (_isArchiveScanning)
+        {
+            return;
+        }
+
+        _isArchiveScanning = true;
+        _lastArchivePreviewRefresh = DateTimeOffset.MinValue;
+        _lastArchivePreviewImageCount = 0;
+        _archiveScanCancellation?.Dispose();
+        _archiveScanCancellation = new CancellationTokenSource();
+        var cancellationToken = _archiveScanCancellation.Token;
+        _archiveScanProgress = new ScanProgress("Starting archive scan", container.RelativePath, 0, 0, 0);
+        var progress = new Progress<ScanProgress>(value =>
+        {
+            _archiveScanProgress = value;
+            _ = InvokeAsync(async () =>
+            {
+                if (ShouldRefreshArchivePreview(value))
+                {
+                    await RefreshArchivePreviewAsync();
+                    return;
+                }
+
+                StateHasChanged();
+            });
+        });
+
+        try
+        {
+            await Task.Run(() => Scanner.ScanContainerAsync(container.Id, progress, cancellationToken), cancellationToken);
+            _snapshot = await Library.GetSnapshotAsync(container.Id, _search, SelectedRating, _unratedOnly);
+        }
+        catch (OperationCanceledException)
+        {
+            _snapshot = await Library.GetSnapshotAsync(container.Id, _search, SelectedRating, _unratedOnly);
+        }
+        finally
+        {
+            _isArchiveScanning = false;
+            _archiveScanProgress = null;
+            _archiveScanCancellation?.Dispose();
+            _archiveScanCancellation = null;
+        }
+    }
+
+    private void CancelArchiveScan()
+    {
+        _archiveScanProgress = _archiveScanProgress is null
+            ? null
+            : _archiveScanProgress with { Phase = "Cancelling archive scan" };
+        _archiveScanCancellation?.Cancel();
+    }
+
+    private async Task ClearUiForRescanAsync()
+    {
+        _archiveScanCancellation?.Cancel();
+
+        if (_viewerAsset is not null)
+        {
+            await CloseViewer();
+        }
+
+        _editingAsset = null;
+        _viewerAsset = null;
+        _snapshot = null;
+        _lastScan = null;
+        _folderScanProgress = null;
+        _archiveScanProgress = null;
+        _isArchiveScanning = false;
+        _lastArchivePreviewRefresh = DateTimeOffset.MinValue;
+        _lastArchivePreviewImageCount = 0;
+        _scanMessage = "Cleared current view. Starting rescan.";
+
+        GC.Collect();
+        GC.WaitForPendingFinalizers();
+        GC.Collect();
+
+        await InvokeAsync(StateHasChanged);
+    }
+
+    private bool ShouldRefreshArchivePreview(ScanProgress progress)
+    {
+        if (progress.Images <= _lastArchivePreviewImageCount)
+        {
+            return false;
+        }
+
+        var now = DateTimeOffset.UtcNow;
+        if (progress.Images > 1 && now - _lastArchivePreviewRefresh < TimeSpan.FromMilliseconds(700))
+        {
+            return false;
+        }
+
+        _lastArchivePreviewImageCount = progress.Images;
+        _lastArchivePreviewRefresh = now;
+        return true;
+    }
+
+    private async Task RefreshArchivePreviewAsync()
+    {
+        if (_isRefreshingArchivePreview)
+        {
+            return;
+        }
+
+        _isRefreshingArchivePreview = true;
+        try
+        {
+            await LoadAsync();
+        }
+        finally
+        {
+            _isRefreshingArchivePreview = false;
+        }
+    }
+
+    private async Task OpenViewer(AssetCard asset)
+    {
+        _viewerAsset = asset;
+        await ConnectViewerKeyboardAsync();
+    }
+
+    private async Task CloseViewer()
+    {
+        _viewerAsset = null;
+        await DisconnectViewerKeyboardAsync();
+    }
+
+    private async Task PreviousImage()
+    {
+        MoveViewer(-1);
+        await ScrollActiveFilmstripItemAsync();
+    }
+
+    private async Task NextImage()
+    {
+        MoveViewer(1);
+        await ScrollActiveFilmstripItemAsync();
+    }
+
+    [JSInvokable]
+    public async Task PreviousImageFromKeyboard()
+    {
+        await PreviousImage();
+        StateHasChanged();
+    }
+
+    [JSInvokable]
+    public async Task NextImageFromKeyboard()
+    {
+        await NextImage();
+        StateHasChanged();
+    }
+
+    [JSInvokable]
+    public async Task CloseViewerFromKeyboard()
+    {
+        await CloseViewer();
+    }
+
+    private void MoveViewer(int direction)
+    {
+        if (_viewerAsset is null)
+        {
+            return;
+        }
+
+        var images = CurrentImages();
+        var index = images.FindIndex(image => image.Id == _viewerAsset.Id);
+        if (index < 0 || images.Count == 0)
+        {
+            return;
+        }
+
+        var nextIndex = (index + direction + images.Count) % images.Count;
+        _viewerAsset = images[nextIndex];
+    }
+
+    private async Task ShowViewerImageAsync(AssetCard asset)
+    {
+        _viewerAsset = asset;
+        await ScrollActiveFilmstripItemAsync();
+    }
+
+    private List<AssetCard> CurrentImages()
+    {
+        return _snapshot?.Images ?? [];
+    }
+
+    private async Task ClearLoadedImagesAsync(long activeContainerId)
+    {
+        if (_viewerAsset is not null)
+        {
+            await CloseViewer();
+        }
+
+        _editingAsset = null;
+
+        if (_snapshot is not null)
+        {
+            _snapshot = _snapshot with
+            {
+                ActiveContainerId = activeContainerId,
+                Images = []
+            };
+        }
+
+        await InvokeAsync(StateHasChanged);
+    }
+
+    private void EditAsset(AssetCard asset)
+    {
+        _editingAsset = asset;
+        _editLabelName = asset.LabelName;
+        _editDescription = asset.Description;
+        _editTags = asset.Tags;
+        _editRating = asset.Rating;
+    }
+
+    private IEnumerable<AssetCard> LabelArchives()
+    {
+        return _snapshot?.Containers.Where(IsLabelAffeArchive) ?? [];
+    }
+
+    private static bool IsLabelAffeArchive(AssetCard asset)
+    {
+        return asset.Kind == AssetKinds.Zip &&
+            !asset.IsIgnored &&
+            asset.SourceType is AssetSourceTypes.ZipArchivePreview or AssetSourceTypes.ZipArchive;
+    }
+
+    private void EnsureLabelArchiveSelected()
+    {
+        if (!_labelAffeMode || _snapshot is null)
+        {
+            return;
+        }
+
+        if (_labelArchiveId is not null && LabelArchives().Any(archive => archive.Id == _labelArchiveId.Value))
+        {
+            return;
+        }
+
+        SelectLabelArchive(LabelArchives().FirstOrDefault());
+    }
+
+    private void SelectLabelArchive(AssetCard? archive)
+    {
+        if (archive is null)
+        {
+            _labelArchiveId = null;
+            _labelName = string.Empty;
+            _labelDescription = string.Empty;
+            _labelTags.Clear();
+            _labelRating = null;
+            return;
+        }
+
+        _labelArchiveId = archive.Id;
+        _labelName = archive.LabelName;
+        _labelDescription = archive.Description;
+        _labelTags.Clear();
+        _labelTags.AddRange(ParseTags(archive.Tags));
+        _labelTagInput = string.Empty;
+        _labelRating = archive.Rating;
+    }
+
+    private async Task SelectLabelArchiveAsync(AssetCard? archive)
+    {
+        SelectLabelArchive(archive);
+        await ScrollActiveLabelArchiveAsync();
+    }
+
+    private async Task MoveLabelArchiveAsync(int direction)
+    {
+        var archives = LabelArchives().ToList();
+        if (archives.Count == 0)
+        {
+            return;
+        }
+
+        var index = _labelArchiveId is null
+            ? -1
+            : archives.FindIndex(archive => archive.Id == _labelArchiveId.Value);
+        var nextIndex = index < 0
+            ? 0
+            : (index + direction + archives.Count) % archives.Count;
+
+        SelectLabelArchive(archives[nextIndex]);
+        await ScrollActiveLabelArchiveAsync();
+        StateHasChanged();
+    }
+
+    [JSInvokable]
+    public async Task PreviousLabelArchiveFromKeyboard()
+    {
+        await MoveLabelArchiveAsync(-1);
+    }
+
+    [JSInvokable]
+    public async Task NextLabelArchiveFromKeyboard()
+    {
+        await MoveLabelArchiveAsync(1);
+    }
+
+    [JSInvokable]
+    public async Task SaveLabelArchiveFromKeyboard()
+    {
+        await SaveLabelAffeAsync();
+        StateHasChanged();
+    }
+
+    [JSInvokable]
+    public async Task SaveAndNextLabelArchiveFromKeyboard()
+    {
+        await SaveAndNextLabelAffeAsync();
+        await ScrollActiveLabelArchiveAsync();
+        StateHasChanged();
+    }
+
+    [JSInvokable]
+    public async Task CloseLabelAffeFromKeyboard()
+    {
+        _labelAffeMode = false;
+        await DisconnectLabelAffeKeyboardAsync();
+        StateHasChanged();
+    }
+
+    private async Task SaveLabelAffeAsync()
+    {
+        if (SelectedLabelArchive is not { } archive)
+        {
+            return;
+        }
+
+        AddLabelTagFromInput();
+        await Library.SaveMetadataAsync(archive.Id, _labelName, _labelDescription, string.Join(", ", _labelTags), _labelRating);
+        _labelSuggestions = await Library.GetLabelSuggestionsAsync();
+        await LoadAsync();
+        SelectLabelArchive(LabelArchives().FirstOrDefault(item => item.Id == archive.Id));
+    }
+
+    private async Task SaveAndNextLabelAffeAsync()
+    {
+        if (SelectedLabelArchive is not { } archive)
+        {
+            return;
+        }
+
+        var archives = LabelArchives().ToList();
+        var index = archives.FindIndex(item => item.Id == archive.Id);
+        await SaveLabelAffeAsync();
+
+        archives = LabelArchives().ToList();
+        if (archives.Count == 0)
+        {
+            return;
+        }
+
+        var nextIndex = index < 0 ? 0 : Math.Min(index + 1, archives.Count - 1);
+        SelectLabelArchive(archives[nextIndex]);
+    }
+
+    private void AddLabelTagFromInput()
+    {
+        foreach (var tag in ParseTags(_labelTagInput))
+        {
+            AddLabelTag(tag);
+        }
+
+        _labelTagInput = string.Empty;
+    }
+
+    private void AddLabelTag(string tag)
+    {
+        tag = NormalizeTag(tag);
+        if (string.IsNullOrWhiteSpace(tag) || _labelTags.Contains(tag, StringComparer.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        _labelTags.Add(tag);
+    }
+
+    private void RemoveLabelTag(string tag)
+    {
+        _labelTags.RemoveAll(item => string.Equals(item, tag, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private void HandleLabelTagKeyUp(KeyboardEventArgs args)
+    {
+        if (args.Key is "Enter" or "," or ";")
+        {
+            AddLabelTagFromInput();
+        }
+    }
+
+    private IEnumerable<string> TagSuggestions(AssetCard archive)
+    {
+        var query = _labelTagInput.Trim();
+        return _labelSuggestions.Tags
+            .Concat(TokenSuggestions(archive))
+            .Select(NormalizeTag)
+            .Where(tag => !string.IsNullOrWhiteSpace(tag))
+            .Where(tag => string.IsNullOrWhiteSpace(query) || tag.Contains(query, StringComparison.OrdinalIgnoreCase))
+            .Where(tag => !_labelTags.Contains(tag, StringComparer.OrdinalIgnoreCase))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(tag => tag);
+    }
+
+    private IEnumerable<string> NameSuggestions(AssetCard archive)
+    {
+        return new[] { CleanArchiveName(archive.Name), CleanArchiveName(archive.RelativePath) }
+            .Concat(_labelSuggestions.Names)
+            .Where(name => !string.IsNullOrWhiteSpace(name))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(name => name);
+    }
+
+    private IEnumerable<string> TextSuggestions(AssetCard archive)
+    {
+        return new[]
+            {
+                string.IsNullOrWhiteSpace(_labelName) ? CleanArchiveName(archive.Name) : _labelName,
+                archive.RelativePath
+            }
+            .Concat(_labelSuggestions.Text)
+            .Where(text => !string.IsNullOrWhiteSpace(text))
+            .Distinct(StringComparer.OrdinalIgnoreCase);
+    }
+
+    private void ApplyNameSuggestion(string suggestion)
+    {
+        _labelName = suggestion;
+    }
+
+    private void ApplyTextSuggestion(string suggestion)
+    {
+        _labelDescription = string.IsNullOrWhiteSpace(_labelDescription)
+            ? suggestion
+            : $"{_labelDescription.Trim()}\n{suggestion}";
+    }
+
+    private static IEnumerable<string> ParseTags(string tags)
+    {
+        return tags.Split([',', ';', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Select(NormalizeTag)
+            .Where(tag => !string.IsNullOrWhiteSpace(tag))
+            .Distinct(StringComparer.OrdinalIgnoreCase);
+    }
+
+    private static IEnumerable<string> TokenSuggestions(AssetCard archive)
+    {
+        return $"{archive.Name} {archive.LabelName} {archive.RelativePath}"
+            .Split([' ', '_', '-', '.', '/', '\\', '(', ')', '[', ']'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Where(token => token.Length > 2 && !token.All(char.IsDigit));
+    }
+
+    private static string NormalizeTag(string tag)
+    {
+        return tag.Trim().ToLowerInvariant();
+    }
+
+    private static string CleanArchiveName(string value)
+    {
+        return System.IO.Path.GetFileNameWithoutExtension(value)
+            .Replace('_', ' ')
+            .Replace('-', ' ')
+            .Trim();
+    }
+
+    private void CloseEditor()
+    {
+        _editingAsset = null;
+    }
+
+    private async Task SaveMetadataAsync()
+    {
+        if (_editingAsset is null)
+        {
+            return;
+        }
+
+        await Library.SaveMetadataAsync(_editingAsset.Id, _editLabelName, _editDescription, _editTags, _editRating);
+        _editingAsset = await Library.GetAssetAsync(_editingAsset.Id);
+        if (_viewerAsset?.Id == _editingAsset?.Id)
+        {
+            _viewerAsset = _editingAsset;
+        }
+
+        await LoadAsync();
+    }
+
+    private async Task ToggleIgnoredAsync(AssetCard asset)
+    {
+        await Library.SetIgnoredAsync(asset.Id, !asset.IsIgnored);
+        if (_viewerAsset?.Id == asset.Id)
+        {
+            _viewerAsset = await Library.GetAssetAsync(asset.Id);
+        }
+
+        if (_editingAsset?.Id == asset.Id)
+        {
+            _editingAsset = await Library.GetAssetAsync(asset.Id);
+        }
+
+        await LoadAsync();
+    }
+
+    private int? SelectedRating => int.TryParse(_ratingFilter, out var rating) ? rating : null;
+
+    private static string ImageUrl(long id) => $"/api/assets/{id}/content";
+
+    private static string SourcePageUrl(long id) => $"/source/{id}";
+
+    private static string Stars(int? rating) => rating is null ? "Unrated" : new string('*', rating.Value);
+
+    private static string StatusBadge(AssetCard asset) => asset.IsIgnored ? "Ignored" : Stars(asset.Rating);
+
+    private IEnumerable<AssetCard> VisibleContainers()
+    {
+        if (_snapshot is null)
+        {
+            return [];
+        }
+
+        var byId = _snapshot.Containers.ToDictionary(container => container.Id);
+        if (_showArchivesOnly)
+        {
+            return _snapshot.Containers.Where(container => container.Kind == AssetKinds.Zip);
+        }
+
+        return _snapshot.Containers.Where(container => IsSourceVisible(container, byId));
+    }
+
+    private bool IsSourceVisible(AssetCard container, Dictionary<long, AssetCard> byId)
+    {
+        var parentId = container.ParentId;
+        while (parentId is not null && byId.TryGetValue(parentId.Value, out var parent))
+        {
+            if (_collapsedSourceIds.Contains(parent.Id))
+            {
+                return false;
+            }
+
+            parentId = parent.ParentId;
+        }
+
+        return true;
+    }
+
+    private bool HasSourceChildren(AssetCard asset)
+    {
+        return _snapshot?.Containers.Any(container => container.ParentId == asset.Id) == true;
+    }
+
+    private bool IsSourceCollapsed(long id) => _collapsedSourceIds.Contains(id);
+
+    private void ToggleSourceCollapsed(long id)
+    {
+        if (_collapsedSourceIds.Contains(id))
+        {
+            _collapsedSourceIds.Remove(id);
+        }
+        else
+        {
+            _collapsedSourceIds.Add(id);
+        }
+    }
+
+    private void PruneCollapsedSources()
+    {
+        if (_snapshot is null)
+        {
+            _collapsedSourceIds.Clear();
+            return;
+        }
+
+        var availableIds = _snapshot.Containers.Select(container => container.Id).ToHashSet();
+        _collapsedSourceIds.RemoveWhere(id => !availableIds.Contains(id));
+    }
+
+    private void ExpandSourceAncestors(AssetCard asset)
+    {
+        if (_snapshot is null)
+        {
+            return;
+        }
+
+        var byId = _snapshot.Containers.ToDictionary(container => container.Id);
+        var parentId = asset.ParentId;
+        while (parentId is not null && byId.TryGetValue(parentId.Value, out var parent))
+        {
+            _collapsedSourceIds.Remove(parent.Id);
+            parentId = parent.ParentId;
+        }
+    }
+
+    private static string DisplaySourceType(AssetCard asset)
+    {
+        return asset.SourceType switch
+        {
+            AssetSourceTypes.FileSystemFolder => "Folder",
+            AssetSourceTypes.FileSystemImage => "Image",
+            AssetSourceTypes.FileSystemAudio => "Audio",
+            AssetSourceTypes.FileSystemVideo => "Video",
+            AssetSourceTypes.ZipArchivePreview => "Archive preview",
+            AssetSourceTypes.ZipArchive => "Archive",
+            AssetSourceTypes.ZipFolderEntry => "Archive folder",
+            AssetSourceTypes.ZipImageEntry => "Archive image",
+            AssetSourceTypes.ZipAudioEntry => "Archive audio",
+            AssetSourceTypes.ZipVideoEntry => "Archive video",
+            AssetSourceTypes.NestedZipArchive => "Nested archive",
+            AssetSourceTypes.NestedZipImageEntry => "Nested archive image",
+            AssetSourceTypes.NestedZipAudioEntry => "Nested archive audio",
+            AssetSourceTypes.NestedZipVideoEntry => "Nested archive video",
+            _ => asset.SourceType
+        };
+    }
+
+    private static RenderFragment ViewerMedia(AssetCard asset) => builder =>
+    {
+        if (asset.IsVideo)
+        {
+            builder.OpenElement(0, "video");
+            builder.AddAttribute(1, "src", ImageUrl(asset.Id));
+            builder.AddAttribute(2, "controls", true);
+            builder.AddAttribute(3, "preload", "metadata");
+            builder.AddAttribute(4, "autoplay", true);
+            builder.AddAttribute(5, "loop", true);
+            builder.CloseElement();
+            return;
+        }
+
+        if (asset.IsAudio)
+        {
+            builder.OpenElement(5, "div");
+            builder.AddAttribute(6, "class", "audio-viewer");
+            builder.OpenElement(7, "span");
+            builder.AddAttribute(8, "class", "media-kind");
+            builder.AddContent(9, "AUD");
+            builder.CloseElement();
+            builder.OpenElement(10, "audio");
+            builder.AddAttribute(11, "src", ImageUrl(asset.Id));
+            builder.AddAttribute(12, "controls", true);
+            builder.AddAttribute(13, "preload", "metadata");
+            builder.AddAttribute(14, "autoplay", true);
+            builder.CloseElement();
+            builder.CloseElement();
+            return;
+        }
+
+        builder.OpenElement(15, "img");
+        builder.AddAttribute(16, "src", ImageUrl(asset.Id));
+        builder.AddAttribute(17, "alt", asset.DisplayName);
+        builder.CloseElement();
+    };
+
+    private static RenderFragment FilmstripMedia(AssetCard asset) => builder =>
+    {
+        if (asset.IsImage)
+        {
+            builder.OpenElement(0, "img");
+            builder.AddAttribute(1, "src", ImageUrl(asset.Id));
+            builder.AddAttribute(2, "alt", asset.DisplayName);
+            builder.CloseElement();
+            return;
+        }
+
+        if (asset.IsVideo)
+        {
+            builder.OpenElement(3, "video");
+            builder.AddAttribute(4, "src", $"{ImageUrl(asset.Id)}#t=0.1");
+            builder.AddAttribute(5, "preload", "metadata");
+            builder.AddAttribute(6, "muted", true);
+            builder.AddAttribute(7, "playsinline", true);
+            builder.CloseElement();
+            return;
+        }
+
+        builder.OpenElement(8, "span");
+        builder.AddAttribute(9, "class", "media-placeholder compact");
+        builder.OpenElement(10, "span");
+        builder.AddAttribute(11, "class", "media-kind");
+        builder.AddContent(12, "AUD");
+        builder.CloseElement();
+        builder.CloseElement();
+    };
+
+    private static string SourceIndent(AssetCard asset, bool flatten = false)
+    {
+        var level = flatten ? 0 : Math.Min(asset.Depth, 6);
+        var nested = Math.Min(level, 4);
+        var thumbSize = Math.Max(34, 58 - (nested * 5));
+        var rowHeight = Math.Max(46, 76 - (nested * 7));
+        var rowGap = Math.Max(4, 8 - nested);
+        var padY = Math.Max(4, 8 - nested);
+        var gap = Math.Max(7, 12 - nested);
+        var fontSize = Math.Max(0.84, 1 - (nested * 0.035));
+        var smallSize = Math.Max(0.64, 0.78 - (nested * 0.025));
+
+        return string.Join("; ", [
+            $"--source-level: {level}",
+            $"--source-thumb-size: {thumbSize}px",
+            $"--source-row-height: {rowHeight}px",
+            $"--source-row-gap: {rowGap}px",
+            $"--source-pad-y: {padY}px",
+            $"--source-gap: {gap}px",
+            $"--source-font-size: {fontSize:0.###}rem",
+            $"--source-small-size: {smallSize:0.###}rem"
+        ]);
+    }
+
+    private static string SourceStatus(AssetCard asset)
+    {
+        if (asset.IsIgnored)
+        {
+            return "Ignored";
+        }
+
+        if (asset.SourceType == AssetSourceTypes.ZipArchivePreview)
+        {
+            return asset.ImageCount > 0 ? "Media found, click to scan" : "Click to scan archive";
+        }
+
+        if (asset.Kind == AssetKinds.Zip && asset.ChildCount == 0)
+        {
+            return "Click to scan archive";
+        }
+
+        return $"{asset.ImageCount} media files";
+    }
+
+    private static bool ShouldScanArchive(AssetCard asset)
+    {
+        return !asset.IsIgnored && (asset.SourceType == AssetSourceTypes.ZipArchivePreview || asset.ChildCount == 0);
+    }
+
+    private async Task ConnectViewerKeyboardAsync()
+    {
+        if (_keyboardConnected)
+        {
+            return;
+        }
+
+        _keyboardReference ??= DotNetObjectReference.Create(this);
+        await JsRuntime.InvokeVoidAsync("imageVault.viewerKeys.connect", _keyboardReference);
+        _keyboardConnected = true;
+    }
+
+    private async Task ConnectLabelAffeKeyboardAsync()
+    {
+        if (_labelKeyboardConnected)
+        {
+            return;
+        }
+
+        _keyboardReference ??= DotNetObjectReference.Create(this);
+        await JsRuntime.InvokeVoidAsync("imageVault.labelAffeKeys.connect", _keyboardReference);
+        _labelKeyboardConnected = true;
+    }
+
+    private async Task DisconnectViewerKeyboardAsync()
+    {
+        if (!_keyboardConnected)
+        {
+            return;
+        }
+
+        await JsRuntime.InvokeVoidAsync("imageVault.viewerKeys.disconnect");
+        _keyboardConnected = false;
+    }
+
+    private async Task DisconnectLabelAffeKeyboardAsync()
+    {
+        if (!_labelKeyboardConnected)
+        {
+            return;
+        }
+
+        await JsRuntime.InvokeVoidAsync("imageVault.labelAffeKeys.disconnect");
+        _labelKeyboardConnected = false;
+    }
+
+    private async Task ScrollActiveFilmstripItemAsync()
+    {
+        await JsRuntime.InvokeVoidAsync("imageVault.scrollActiveFilmstripItem");
+    }
+
+    private async Task ScrollActiveLabelArchiveAsync()
+    {
+        await JsRuntime.InvokeVoidAsync("imageVault.scrollActiveLabelArchive");
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        try
+        {
+            await DisconnectViewerKeyboardAsync();
+            await DisconnectLabelAffeKeyboardAsync();
+        }
+        catch (JSDisconnectedException)
+        {
+        }
+
+        _keyboardReference?.Dispose();
+        _rootScanCancellation?.Cancel();
+        _rootScanCancellation?.Dispose();
+        _archiveScanCancellation?.Cancel();
+        _archiveScanCancellation?.Dispose();
+    }
+}
+

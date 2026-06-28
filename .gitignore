@@ -1,0 +1,48 @@
+# Build output
+bin/
+obj/
+artifacts/
+TestResults/
+
+# Local app data
+App_Data/
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+
+# User and IDE state
+.vs/
+.vscode/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+# Keep shared Rider run configurations, ignore user workspace state
+.idea/
+!.run/
+!.run/*.run.xml
+
+# Logs and diagnostics
+*.log
+logs/
+*.dmp
+*.trace
+
+# Docker/local environment overrides
+.env
+.env.*
+!.env.example
+docker-compose.override.yml
+library/
+!library/.gitkeep
+!library/.imagevault/
+!library/.imagevault/.gitkeep
+
+# OS files
+Thumbs.db
+Desktop.ini
+.DS_Store

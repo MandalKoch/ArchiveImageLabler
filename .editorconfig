@@ -1,0 +1,51 @@
+root = true
+
+[*]
+charset = utf-8
+end_of_line = crlf
+insert_final_newline = true
+trim_trailing_whitespace = true
+
+[*.{cs,razor}]
+indent_style = space
+indent_size = 4
+
+# Keep Rider/Roslyn naming aligned with the codebase.
+dotnet_naming_rule.private_instance_fields_should_be_underscore_camel_case.severity = suggestion
+dotnet_naming_rule.private_instance_fields_should_be_underscore_camel_case.symbols = private_instance_fields
+dotnet_naming_rule.private_instance_fields_should_be_underscore_camel_case.style = underscore_camel_case
+
+dotnet_naming_rule.private_static_fields_should_be_pascal_case.severity = suggestion
+dotnet_naming_rule.private_static_fields_should_be_pascal_case.symbols = private_static_fields
+dotnet_naming_rule.private_static_fields_should_be_pascal_case.style = pascal_case
+
+dotnet_naming_rule.private_constants_should_be_pascal_case.severity = suggestion
+dotnet_naming_rule.private_constants_should_be_pascal_case.symbols = private_constants
+dotnet_naming_rule.private_constants_should_be_pascal_case.style = pascal_case
+
+dotnet_naming_symbols.private_instance_fields.applicable_kinds = field
+dotnet_naming_symbols.private_instance_fields.applicable_accessibilities = private
+
+dotnet_naming_symbols.private_static_fields.applicable_kinds = field
+dotnet_naming_symbols.private_static_fields.applicable_accessibilities = private
+dotnet_naming_symbols.private_static_fields.required_modifiers = static
+
+dotnet_naming_symbols.private_constants.applicable_kinds = field
+dotnet_naming_symbols.private_constants.applicable_accessibilities = private
+dotnet_naming_symbols.private_constants.required_modifiers = const
+
+dotnet_naming_style.underscore_camel_case.required_prefix = _
+dotnet_naming_style.underscore_camel_case.capitalization = camel_case
+dotnet_naming_style.camel_case.capitalization = camel_case
+dotnet_naming_style.pascal_case.capitalization = pascal_case
+
+# Common C# preferences.
+dotnet_style_qualification_for_event = false:suggestion
+dotnet_style_qualification_for_field = false:suggestion
+dotnet_style_qualification_for_method = false:suggestion
+dotnet_style_qualification_for_property = false:suggestion
+
+csharp_style_namespace_declarations = file_scoped:suggestion
+csharp_style_var_elsewhere = true:suggestion
+csharp_style_var_for_built_in_types = true:suggestion
+csharp_style_var_when_type_is_apparent = true:suggestion

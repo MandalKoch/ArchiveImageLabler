@@ -1,0 +1,25 @@
+@if (AssetId is not null)
+{
+    <span class="thumb">
+        @if (AssetKind == AssetKinds.Video)
+        {
+            <video src="@MediaUrl(AssetId.Value)#t=0.1" preload="metadata" muted playsinline></video>
+        }
+        else
+        {
+            <img src="@MediaUrl(AssetId.Value)" alt="" />
+        }
+    </span>
+}
+else
+{
+    <span class="thumb placeholder">ZIP</span>
+}
+
+@code {
+    [Parameter] public long? AssetId { get; set; }
+
+    [Parameter] public string? AssetKind { get; set; }
+
+    private static string MediaUrl(long id) => $"/api/assets/{id}/content";
+}

@@ -1,0 +1,603 @@
+@page "/source/{ContainerId:long}"
+@rendermode InteractiveServer
+@inject LibraryScanner Scanner
+@inject LibraryQueries Library
+@inject IJSRuntime JsRuntime
+@implements IAsyncDisposable
+
+<PageTitle>@(_source?.DisplayName ?? "Source") - FileZipPreview</PageTitle>
+
+<div class="shell source-page">
+    <header class="app-header">
+        <div>
+            <p class="eyebrow">Source page</p>
+            <h1>@(_source?.DisplayName ?? "Source")</h1>
+            <p class="path">@(_source?.RelativePath ?? "Loading")</p>
+        </div>
+
+        <div class="toolbar">
+            <MemoryUsage />
+            <a class="secondary-button" href="/">Library</a>
+            @if (_source is not null)
+            {
+                <button class="icon-button" title="Edit metadata" @onclick="() => EditAsset(_source)">Edit</button>
+                @if (_source.Kind == AssetKinds.Zip)
+                {
+                    <button class="secondary-button" @onclick="ToggleIgnoredAsync">
+                        @(_source.IsIgnored ? "Unignore" : "Ignore")
+                    </button>
+                    <button class="secondary-button" @onclick="ScanArchiveAsync" disabled="@(_isArchiveScanning || _source.IsIgnored)">
+                        @(_isArchiveScanning ? "Scanning" : "Rescan archive")
+                    </button>
+                    @if (_isArchiveScanning)
+                    {
+                        <button class="secondary-button" @onclick="CancelArchiveScan">Cancel</button>
+                    }
+                }
+            }
+        </div>
+    </header>
+
+    @if (_isArchiveScanning && _archiveScanProgress is not null)
+    {
+        <section class="progress-panel archive-progress">
+            <div>
+                <strong>@_archiveScanProgress.Phase</strong>
+                <span>@_archiveScanProgress.CurrentItem</span>
+            </div>
+            <div class="progress-bar"><span></span></div>
+            <small>@_archiveScanProgress.Images media files found · @_archiveScanProgress.Errors errors</small>
+            <button class="secondary-button" @onclick="CancelArchiveScan">Cancel</button>
+        </section>
+    }
+
+    <section class="filters">
+        <input placeholder="Search names, tags, descriptions" @bind="_search" @bind:event="oninput" />
+        <select @bind="_ratingFilter">
+            <option value="">Any rating</option>
+            <option value="5">5 stars</option>
+            <option value="4">4 stars</option>
+            <option value="3">3 stars</option>
+            <option value="2">2 stars</option>
+            <option value="1">1 star</option>
+        </select>
+        <label class="check">
+            <input type="checkbox" @bind="_unratedOnly" />
+            Unrated
+        </label>
+        <button class="secondary-button" @onclick="LoadAsync">Apply</button>
+    </section>
+
+    <section class="preview-panel">
+        <div class="panel-heading">
+            <div>
+                <p class="eyebrow">@(_source is null ? "Source" : DisplaySourceType(_source))</p>
+                <h2>@(_source is null ? "Loading" : _source.IsIgnored ? "Ignored" : $"{_images.Count} media files")</h2>
+            </div>
+            @if (_source?.PreviewImageId is not null)
+            {
+                <Preview AssetId="_source.PreviewImageId" AssetKind="_source.PreviewKind" />
+            }
+        </div>
+
+        @if (_source is null)
+        {
+            <div class="empty-state inline">
+                <h2>Source not found</h2>
+            </div>
+        }
+        else
+        {
+            <ImageGrid Images="_images" OnOpen="OpenViewer" />
+        }
+    </section>
+</div>
+
+@if (_editingAsset is not null)
+{
+    <div class="drawer">
+        <div class="drawer-panel">
+            <div class="panel-heading compact">
+                <div>
+                    <p class="eyebrow">@_editingAsset.Kind</p>
+                    <h2>@_editingAsset.DisplayName</h2>
+                </div>
+                <button class="icon-button" title="Close" @onclick="CloseEditor">x</button>
+            </div>
+
+            @if (_editingAsset.PreviewImageId is not null)
+            {
+                @if (_editingAsset.PreviewKind == AssetKinds.Video)
+                {
+                    <video class="viewer-image" src="@ImageUrl(_editingAsset.PreviewImageId.Value)#t=0.1" controls preload="metadata" muted loop></video>
+                }
+                else
+                {
+                    <img class="viewer-image" src="@ImageUrl(_editingAsset.PreviewImageId.Value)" alt="@_editingAsset.DisplayName" />
+                }
+            }
+
+            <label class="field">
+                <span>Label name</span>
+                <input @bind="_editLabelName" placeholder="@_editingAsset.Name" />
+            </label>
+
+            <label class="field">
+                <span>Rating</span>
+                <select @bind="_editRating">
+                    <option value="">Unrated</option>
+                    <option value="5">5 stars</option>
+                    <option value="4">4 stars</option>
+                    <option value="3">3 stars</option>
+                    <option value="2">2 stars</option>
+                    <option value="1">1 star</option>
+                </select>
+            </label>
+
+            <label class="field">
+                <span>Tags</span>
+                <input @bind="_editTags" placeholder="portrait, reference, favorite" />
+            </label>
+
+            <label class="field">
+                <span>Description</span>
+                <textarea @bind="_editDescription" rows="5"></textarea>
+            </label>
+
+            <div class="drawer-actions">
+                <button class="primary-button" @onclick="SaveMetadataAsync">Save</button>
+                <button class="secondary-button" @onclick="CloseEditor">Cancel</button>
+            </div>
+        </div>
+    </div>
+}
+
+@if (_viewerAsset is not null)
+{
+    <div class="viewer">
+        <button class="viewer-backdrop" title="Close viewer" @onclick="CloseViewer"></button>
+        <div class="viewer-panel">
+            <header class="viewer-topbar">
+                <div>
+                    <p class="eyebrow">@DisplaySourceType(_viewerAsset)</p>
+                    <h2>@_viewerAsset.DisplayName</h2>
+                </div>
+                <div class="viewer-controls">
+                    <button class="secondary-button" @onclick="PreviousImage">Previous</button>
+                    <button class="secondary-button" @onclick="NextImage">Next</button>
+                    <button class="primary-button" @onclick="() => EditAsset(_viewerAsset)">Edit</button>
+                    <button class="icon-button" title="Close" @onclick="CloseViewer">x</button>
+                </div>
+            </header>
+            <div class="viewer-stage">
+                @ViewerMedia(_viewerAsset)
+            </div>
+            <footer class="viewer-filmstrip">
+                <div class="viewer-meta-line">
+                    <span class="muted">@_viewerAsset.RelativePath</span>
+                    <span class="stars">@StatusBadge(_viewerAsset)</span>
+                    @if (!string.IsNullOrWhiteSpace(_viewerAsset.Tags))
+                    {
+                        <span class="tags">@_viewerAsset.Tags</span>
+                    }
+                </div>
+                <div class="filmstrip-row">
+                    @foreach (var image in _images)
+                    {
+                        <button @key="image.Id" class="filmstrip-item @(image.Id == _viewerAsset.Id ? "active" : null)" title="@image.DisplayName" @onclick="() => ShowViewerImageAsync(image)">
+                            @FilmstripMedia(image)
+                        </button>
+                    }
+                </div>
+            </footer>
+        </div>
+    </div>
+}
+
+@code {
+    [Parameter] public long ContainerId { get; set; }
+
+    private AssetCard? _source;
+    private List<AssetCard> _images = [];
+    private string _search = string.Empty;
+    private string _ratingFilter = string.Empty;
+    private bool _unratedOnly;
+    private bool _isArchiveScanning;
+    private bool _isRefreshingArchivePreview;
+    private ScanProgress? _archiveScanProgress;
+    private DateTimeOffset _lastArchivePreviewRefresh = DateTimeOffset.MinValue;
+    private int _lastArchivePreviewImageCount;
+    private AssetCard? _editingAsset;
+    private AssetCard? _viewerAsset;
+    private string _editLabelName = string.Empty;
+    private string _editDescription = string.Empty;
+    private string _editTags = string.Empty;
+    private int? _editRating;
+    private DotNetObjectReference<Source>? _keyboardReference;
+    private bool _keyboardConnected;
+    private long? _loadedContainerId;
+    private CancellationTokenSource? _archiveScanCancellation;
+
+    protected override async Task OnParametersSetAsync()
+    {
+        if (_loadedContainerId != ContainerId)
+        {
+            await ClearLoadedImagesAsync();
+            _loadedContainerId = ContainerId;
+        }
+
+        await LoadAsync();
+
+        if (_source is { Kind: AssetKinds.Zip } source && ShouldScanArchive(source))
+        {
+            await ScanArchiveAsync();
+        }
+    }
+
+    private async Task LoadAsync()
+    {
+        var snapshot = await Library.GetSnapshotAsync(ContainerId, _search, SelectedRating, _unratedOnly);
+        _source = snapshot.Containers.SingleOrDefault(container => container.Id == ContainerId);
+        _images = snapshot.Images;
+    }
+
+    private async Task ScanArchiveAsync()
+    {
+        if (_isArchiveScanning || _source?.Kind != AssetKinds.Zip)
+        {
+            return;
+        }
+
+        _isArchiveScanning = true;
+        _lastArchivePreviewRefresh = DateTimeOffset.MinValue;
+        _lastArchivePreviewImageCount = 0;
+        _archiveScanCancellation?.Dispose();
+        _archiveScanCancellation = new CancellationTokenSource();
+        var cancellationToken = _archiveScanCancellation.Token;
+        _archiveScanProgress = new ScanProgress("Starting archive scan", _source.RelativePath, 0, 0, 0);
+        var progress = new Progress<ScanProgress>(value =>
+        {
+            _archiveScanProgress = value;
+            _ = InvokeAsync(async () =>
+            {
+                if (ShouldRefreshArchivePreview(value))
+                {
+                    await RefreshArchivePreviewAsync();
+                    return;
+                }
+
+                StateHasChanged();
+            });
+        });
+
+        try
+        {
+            await Task.Run(() => Scanner.ScanContainerAsync(ContainerId, progress, cancellationToken), cancellationToken);
+            await LoadAsync();
+        }
+        catch (OperationCanceledException)
+        {
+            await LoadAsync();
+        }
+        finally
+        {
+            _isArchiveScanning = false;
+            _archiveScanProgress = null;
+            _archiveScanCancellation?.Dispose();
+            _archiveScanCancellation = null;
+        }
+    }
+
+    private void CancelArchiveScan()
+    {
+        _archiveScanProgress = _archiveScanProgress is null
+            ? null
+            : _archiveScanProgress with { Phase = "Cancelling archive scan" };
+        _archiveScanCancellation?.Cancel();
+    }
+
+    private bool ShouldRefreshArchivePreview(ScanProgress progress)
+    {
+        if (progress.Images <= _lastArchivePreviewImageCount)
+        {
+            return false;
+        }
+
+        var now = DateTimeOffset.UtcNow;
+        if (progress.Images > 1 && now - _lastArchivePreviewRefresh < TimeSpan.FromMilliseconds(700))
+        {
+            return false;
+        }
+
+        _lastArchivePreviewImageCount = progress.Images;
+        _lastArchivePreviewRefresh = now;
+        return true;
+    }
+
+    private async Task RefreshArchivePreviewAsync()
+    {
+        if (_isRefreshingArchivePreview)
+        {
+            return;
+        }
+
+        _isRefreshingArchivePreview = true;
+        try
+        {
+            await LoadAsync();
+        }
+        finally
+        {
+            _isRefreshingArchivePreview = false;
+        }
+    }
+
+    private async Task OpenViewer(AssetCard asset)
+    {
+        _viewerAsset = asset;
+        await ConnectViewerKeyboardAsync();
+    }
+
+    private async Task CloseViewer()
+    {
+        _viewerAsset = null;
+        await DisconnectViewerKeyboardAsync();
+    }
+
+    private async Task PreviousImage()
+    {
+        MoveViewer(-1);
+        await ScrollActiveFilmstripItemAsync();
+    }
+
+    private async Task NextImage()
+    {
+        MoveViewer(1);
+        await ScrollActiveFilmstripItemAsync();
+    }
+
+    [JSInvokable]
+    public async Task PreviousImageFromKeyboard()
+    {
+        await PreviousImage();
+        StateHasChanged();
+    }
+
+    [JSInvokable]
+    public async Task NextImageFromKeyboard()
+    {
+        await NextImage();
+        StateHasChanged();
+    }
+
+    [JSInvokable]
+    public async Task CloseViewerFromKeyboard()
+    {
+        await CloseViewer();
+    }
+
+    private void MoveViewer(int direction)
+    {
+        if (_viewerAsset is null)
+        {
+            return;
+        }
+
+        var index = _images.FindIndex(image => image.Id == _viewerAsset.Id);
+        if (index < 0 || _images.Count == 0)
+        {
+            return;
+        }
+
+        var nextIndex = (index + direction + _images.Count) % _images.Count;
+        _viewerAsset = _images[nextIndex];
+    }
+
+    private async Task ClearLoadedImagesAsync()
+    {
+        if (_viewerAsset is not null)
+        {
+            await CloseViewer();
+        }
+
+        _editingAsset = null;
+        _source = null;
+        _images = [];
+        await InvokeAsync(StateHasChanged);
+    }
+
+    private async Task ShowViewerImageAsync(AssetCard asset)
+    {
+        _viewerAsset = asset;
+        await ScrollActiveFilmstripItemAsync();
+    }
+
+    private void EditAsset(AssetCard asset)
+    {
+        _editingAsset = asset;
+        _editLabelName = asset.LabelName;
+        _editDescription = asset.Description;
+        _editTags = asset.Tags;
+        _editRating = asset.Rating;
+    }
+
+    private void CloseEditor()
+    {
+        _editingAsset = null;
+    }
+
+    private async Task SaveMetadataAsync()
+    {
+        if (_editingAsset is null)
+        {
+            return;
+        }
+
+        await Library.SaveMetadataAsync(_editingAsset.Id, _editLabelName, _editDescription, _editTags, _editRating);
+        _editingAsset = await Library.GetAssetAsync(_editingAsset.Id);
+        if (_viewerAsset?.Id == _editingAsset?.Id)
+        {
+            _viewerAsset = _editingAsset;
+        }
+
+        await LoadAsync();
+    }
+
+    private async Task ToggleIgnoredAsync()
+    {
+        if (_source is null)
+        {
+            return;
+        }
+
+        await Library.SetIgnoredAsync(_source.Id, !_source.IsIgnored);
+        await LoadAsync();
+    }
+
+    private int? SelectedRating => int.TryParse(_ratingFilter, out var rating) ? rating : null;
+
+    private static string ImageUrl(long id) => $"/api/assets/{id}/content";
+
+    private static string Stars(int? rating) => rating is null ? "Unrated" : new string('*', rating.Value);
+
+    private static string StatusBadge(AssetCard asset) => asset.IsIgnored ? "Ignored" : Stars(asset.Rating);
+
+    private static string DisplaySourceType(AssetCard asset)
+    {
+        return asset.SourceType switch
+        {
+            AssetSourceTypes.FileSystemFolder => "Folder",
+            AssetSourceTypes.FileSystemImage => "Image",
+            AssetSourceTypes.FileSystemAudio => "Audio",
+            AssetSourceTypes.FileSystemVideo => "Video",
+            AssetSourceTypes.ZipArchivePreview => "Archive preview",
+            AssetSourceTypes.ZipArchive => "Archive",
+            AssetSourceTypes.ZipFolderEntry => "Archive folder",
+            AssetSourceTypes.ZipImageEntry => "Archive image",
+            AssetSourceTypes.ZipAudioEntry => "Archive audio",
+            AssetSourceTypes.ZipVideoEntry => "Archive video",
+            AssetSourceTypes.NestedZipArchive => "Nested archive",
+            AssetSourceTypes.NestedZipImageEntry => "Nested archive image",
+            AssetSourceTypes.NestedZipAudioEntry => "Nested archive audio",
+            AssetSourceTypes.NestedZipVideoEntry => "Nested archive video",
+            _ => asset.SourceType
+        };
+    }
+
+    private static RenderFragment ViewerMedia(AssetCard asset) => builder =>
+    {
+        if (asset.IsVideo)
+        {
+            builder.OpenElement(0, "video");
+            builder.AddAttribute(1, "src", ImageUrl(asset.Id));
+            builder.AddAttribute(2, "controls", true);
+            builder.AddAttribute(3, "preload", "metadata");
+            builder.AddAttribute(4, "autoplay", true);
+            builder.AddAttribute(5, "loop", true);
+            builder.CloseElement();
+            return;
+        }
+
+        if (asset.IsAudio)
+        {
+            builder.OpenElement(5, "div");
+            builder.AddAttribute(6, "class", "audio-viewer");
+            builder.OpenElement(7, "span");
+            builder.AddAttribute(8, "class", "media-kind");
+            builder.AddContent(9, "AUD");
+            builder.CloseElement();
+            builder.OpenElement(10, "audio");
+            builder.AddAttribute(11, "src", ImageUrl(asset.Id));
+            builder.AddAttribute(12, "controls", true);
+            builder.AddAttribute(13, "preload", "metadata");
+            builder.AddAttribute(14, "autoplay", true);
+            builder.CloseElement();
+            builder.CloseElement();
+            return;
+        }
+
+        builder.OpenElement(15, "img");
+        builder.AddAttribute(16, "src", ImageUrl(asset.Id));
+        builder.AddAttribute(17, "alt", asset.DisplayName);
+        builder.CloseElement();
+    };
+
+    private static RenderFragment FilmstripMedia(AssetCard asset) => builder =>
+    {
+        if (asset.IsImage)
+        {
+            builder.OpenElement(0, "img");
+            builder.AddAttribute(1, "src", ImageUrl(asset.Id));
+            builder.AddAttribute(2, "alt", asset.DisplayName);
+            builder.CloseElement();
+            return;
+        }
+
+        if (asset.IsVideo)
+        {
+            builder.OpenElement(3, "video");
+            builder.AddAttribute(4, "src", $"{ImageUrl(asset.Id)}#t=0.1");
+            builder.AddAttribute(5, "preload", "metadata");
+            builder.AddAttribute(6, "muted", true);
+            builder.AddAttribute(7, "playsinline", true);
+            builder.CloseElement();
+            return;
+        }
+
+        builder.OpenElement(8, "span");
+        builder.AddAttribute(9, "class", "media-placeholder compact");
+        builder.OpenElement(10, "span");
+        builder.AddAttribute(11, "class", "media-kind");
+        builder.AddContent(12, "AUD");
+        builder.CloseElement();
+        builder.CloseElement();
+    };
+
+    private static bool ShouldScanArchive(AssetCard asset)
+    {
+        return !asset.IsIgnored && (asset.SourceType == AssetSourceTypes.ZipArchivePreview || asset.ChildCount == 0);
+    }
+
+    private async Task ConnectViewerKeyboardAsync()
+    {
+        if (_keyboardConnected)
+        {
+            return;
+        }
+
+        _keyboardReference ??= DotNetObjectReference.Create(this);
+        await JsRuntime.InvokeVoidAsync("imageVault.viewerKeys.connect", _keyboardReference);
+        _keyboardConnected = true;
+    }
+
+    private async Task DisconnectViewerKeyboardAsync()
+    {
+        if (!_keyboardConnected)
+        {
+            return;
+        }
+
+        await JsRuntime.InvokeVoidAsync("imageVault.viewerKeys.disconnect");
+        _keyboardConnected = false;
+    }
+
+    private async Task ScrollActiveFilmstripItemAsync()
+    {
+        await JsRuntime.InvokeVoidAsync("imageVault.scrollActiveFilmstripItem");
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        try
+        {
+            await DisconnectViewerKeyboardAsync();
+        }
+        catch (JSDisconnectedException)
+        {
+        }
+
+        _keyboardReference?.Dispose();
+        _archiveScanCancellation?.Cancel();
+        _archiveScanCancellation?.Dispose();
+    }
+}

@@ -1,0 +1,79 @@
+@if (Archives.Count == 0 && Images.Count == 0)
+{
+    <div class="empty-state inline">
+        <h2>No media</h2>
+    </div>
+}
+else
+{
+    <div class="image-grid">
+        @foreach (var archive in Archives)
+        {
+            <button @key="archive.Id" class="image-card archive-card" @onclick="() => OnOpenArchive.InvokeAsync(archive)">
+                <span class="archive-card-preview">
+                    <Preview AssetId="archive.PreviewImageId" AssetKind="archive.PreviewKind" />
+                </span>
+                <span class="image-name">@archive.DisplayName</span>
+                <span class="stars">@ArchiveStatus(archive)</span>
+            </button>
+        }
+
+        @foreach (var item in Images)
+        {
+            <button @key="item.Id" class="image-card" @onclick="() => OnOpen.InvokeAsync(item)">
+                @MediaThumb(item)
+                <span class="image-name">@item.DisplayName</span>
+                <span class="stars">@StatusBadge(item)</span>
+            </button>
+        }
+    </div>
+}
+
+@code {
+    [Parameter] public List<AssetCard> Archives { get; set; } = [];
+
+    [Parameter, EditorRequired] public List<AssetCard> Images { get; set; } = [];
+
+    [Parameter, EditorRequired] public EventCallback<AssetCard> OnOpen { get; set; }
+
+    [Parameter] public EventCallback<AssetCard> OnOpenArchive { get; set; }
+
+    private static string MediaUrl(long id) => $"/api/assets/{id}/content";
+
+    private static string Stars(int? rating) => rating is null ? "Unrated" : new string('*', rating.Value);
+
+    private static string StatusBadge(AssetCard asset) => asset.IsIgnored ? "Ignored" : Stars(asset.Rating);
+
+    private static string ArchiveStatus(AssetCard archive) => archive.IsIgnored ? "Ignored" : $"{archive.ImageCount} media files";
+
+    private static RenderFragment MediaThumb(AssetCard asset) => builder =>
+    {
+        if (asset.IsImage)
+        {
+            builder.OpenElement(0, "img");
+            builder.AddAttribute(1, "src", MediaUrl(asset.Id));
+            builder.AddAttribute(2, "alt", asset.DisplayName);
+            builder.CloseElement();
+            return;
+        }
+
+        if (asset.IsVideo)
+        {
+            builder.OpenElement(3, "video");
+            builder.AddAttribute(4, "src", $"{MediaUrl(asset.Id)}#t=0.1");
+            builder.AddAttribute(5, "preload", "metadata");
+            builder.AddAttribute(6, "muted", true);
+            builder.AddAttribute(7, "playsinline", true);
+            builder.CloseElement();
+            return;
+        }
+
+        builder.OpenElement(8, "span");
+        builder.AddAttribute(9, "class", "media-placeholder");
+        builder.OpenElement(10, "span");
+        builder.AddAttribute(11, "class", "media-kind");
+        builder.AddContent(12, "AUD");
+        builder.CloseElement();
+        builder.CloseElement();
+    };
+}

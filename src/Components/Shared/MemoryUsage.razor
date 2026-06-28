@@ -1,0 +1,78 @@
+@implements IAsyncDisposable
+
+<div class="memory-widget" title="Current server process memory">
+    <span>Memory</span>
+    <strong>@FormatBytes(_snapshot.WorkingSetBytes)</strong>
+    <small>Heap @FormatBytes(_snapshot.ManagedHeapBytes)</small>
+</div>
+
+@code {
+    private readonly CancellationTokenSource _refreshCancellation = new();
+    private Task? _refreshTask;
+    private MemorySnapshot _snapshot = MemorySnapshot.Capture();
+
+    protected override void OnInitialized()
+    {
+        _refreshTask = RefreshLoopAsync();
+    }
+
+    private async Task RefreshLoopAsync()
+    {
+        try
+        {
+            using var timer = new PeriodicTimer(TimeSpan.FromSeconds(2));
+            while (await timer.WaitForNextTickAsync(_refreshCancellation.Token))
+            {
+                _snapshot = MemorySnapshot.Capture();
+                await InvokeAsync(StateHasChanged);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+        }
+    }
+
+    private static string FormatBytes(long bytes)
+    {
+        var value = bytes;
+        string[] units = ["B", "KB", "MB", "GB", "TB"];
+        var unitIndex = 0;
+        double display = value;
+
+        while (display >= 1024 && unitIndex < units.Length - 1)
+        {
+            display /= 1024;
+            unitIndex++;
+        }
+
+        return unitIndex == 0
+            ? $"{display:0} {units[unitIndex]}"
+            : $"{display:0.0} {units[unitIndex]}";
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        await _refreshCancellation.CancelAsync();
+        if (_refreshTask is not null)
+        {
+            try
+            {
+                await _refreshTask;
+            }
+            catch (OperationCanceledException)
+            {
+            }
+        }
+
+        _refreshCancellation.Dispose();
+    }
+
+    private sealed record MemorySnapshot(long WorkingSetBytes, long ManagedHeapBytes)
+    {
+        public static MemorySnapshot Capture()
+        {
+            using var process = System.Diagnostics.Process.GetCurrentProcess();
+            return new MemorySnapshot(process.WorkingSet64, GC.GetTotalMemory(forceFullCollection: false));
+        }
+    }
+}

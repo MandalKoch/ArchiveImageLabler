@@ -1,0 +1,1255 @@
+using System.Collections.Concurrent;
+using System.Security.Cryptography;
+using System.Threading.Channels;
+using FileZipPreview.Data;
+using FileZipPreview.Models;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Options;
+using SharpCompress.Archives;
+using SharpCompress.Common;
+using SharpCompress.Readers;
+
+namespace FileZipPreview.Services;
+
+public sealed class LibraryScanner(
+    IDbContextFactory<LibraryDbContext> dbFactory,
+    IOptions<LibraryOptions> options,
+    ILogger<LibraryScanner> logger)
+{
+    private readonly LibraryOptions _options = options.Value;
+
+    public async Task<ScanSummary> ScanAsync(IProgress<ScanProgress>? progress = null, CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var summary = await ScanRootAsync(progress, cancellationToken);
+        cancellationToken.ThrowIfCancellationRequested();
+        progress?.Report(new ScanProgress("Pruning missing entries", _options.RootPath, summary.Images, summary.Containers, summary.Errors));
+        var pruneSummary = await PruneUnavailableAsync(cancellationToken);
+        summary.Pruned = pruneSummary.Pruned;
+        progress?.Report(new ScanProgress("Scan complete", _options.RootPath, summary.Images, summary.Containers, summary.Errors));
+        return summary;
+    }
+
+    public async Task<ScanSummary> RescanAsync(IProgress<ScanProgress>? progress = null, CancellationToken cancellationToken = default)
+    {
+        Directory.CreateDirectory(_options.DataPath);
+
+        await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
+        await db.Database.EnsureCreatedAsync(cancellationToken);
+
+        progress?.Report(new ScanProgress("Deleting indexed assets", _options.RootPath, 0, 0, 0));
+        var removed = await DeleteAllAssetsAsync(db, MutationBatchSize, cancellationToken);
+
+        var summary = await ScanRootAsync(progress, cancellationToken);
+        summary.Pruned = removed;
+        return summary;
+    }
+
+    public async Task<ScanSummary> PruneUnavailableAsync(CancellationToken cancellationToken = default)
+    {
+        await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
+        await db.Database.EnsureCreatedAsync(cancellationToken);
+
+        return new ScanSummary
+        {
+            Pruned = await PruneUnavailableAsync(db, MutationBatchSize, cancellationToken)
+        };
+    }
+
+    private async Task<ScanSummary> ScanRootAsync(IProgress<ScanProgress>? progress, CancellationToken cancellationToken)
+    {
+        Directory.CreateDirectory(_options.DataPath);
+
+        await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
+        await db.Database.EnsureCreatedAsync(cancellationToken);
+
+        var assets = await db.Assets.ToDictionaryAsync(asset => asset.StableKey, cancellationToken);
+        MarkRootScanTargetsUnavailable(assets.Values);
+
+        var summary = new ScanSummary();
+        var rootPath = Path.GetFullPath(_options.RootPath);
+        if (!Directory.Exists(rootPath))
+        {
+            var rootMissing = Upsert(
+                db,
+                assets,
+                stableKey: $"folder:{rootPath}",
+                parent: null,
+                name: Path.GetFileName(rootPath.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)),
+                kind: AssetKinds.Folder,
+                sourceType: AssetSourceTypes.FileSystemFolder,
+                sourcePath: rootPath,
+                entryChain: null,
+                relativePath: string.Empty,
+                contentType: null,
+                sizeBytes: null,
+                modifiedAt: null,
+                depth: 0);
+
+            rootMissing.IsAvailable = false;
+            rootMissing.ScanError = $"Mounted library path not found: {rootPath}";
+            await db.SaveChangesAsync(cancellationToken);
+            summary.Errors = 1;
+            return summary;
+        }
+
+        var root = Upsert(
+            db,
+            assets,
+            stableKey: $"folder:{rootPath}",
+            parent: null,
+            name: string.IsNullOrWhiteSpace(Path.GetFileName(rootPath)) ? rootPath : Path.GetFileName(rootPath),
+            kind: AssetKinds.Folder,
+            sourceType: AssetSourceTypes.FileSystemFolder,
+            sourcePath: rootPath,
+            entryChain: null,
+            relativePath: string.Empty,
+            contentType: null,
+            sizeBytes: null,
+            modifiedAt: Directory.GetLastWriteTimeUtc(rootPath),
+            depth: 0);
+
+        progress?.Report(new ScanProgress("Scanning folders", rootPath, summary.Images, summary.Containers, summary.Errors));
+        var discovery = await DiscoverFileSystemAssetsAsync(rootPath, progress, cancellationToken);
+        await ApplyFileSystemDiscoveryAsync(db, assets, root, discovery, summary, progress, cancellationToken);
+        MarkMissingArchiveDescendantsUnavailable(assets.Values);
+
+        await db.SaveChangesAsync(cancellationToken);
+        progress?.Report(new ScanProgress("Fast scan complete", rootPath, summary.Images, summary.Containers, summary.Errors));
+        return summary;
+    }
+
+    public async Task<ScanSummary> ScanContainerAsync(long containerId, IProgress<ScanProgress>? progress = null, CancellationToken cancellationToken = default)
+    {
+        return await ScanContainerAsync(containerId, pruneUnavailable: false, progress, cancellationToken);
+    }
+
+    public async Task<ScanSummary> RescanContainerAndPruneAsync(long containerId, IProgress<ScanProgress>? progress = null, CancellationToken cancellationToken = default)
+    {
+        return await ScanContainerAsync(containerId, pruneUnavailable: true, progress, cancellationToken);
+    }
+
+    private async Task<ScanSummary> ScanContainerAsync(long containerId, bool pruneUnavailable, IProgress<ScanProgress>? progress, CancellationToken cancellationToken)
+    {
+        await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
+        await db.Database.EnsureCreatedAsync(cancellationToken);
+
+        var parent = await db.Assets.SingleOrDefaultAsync(asset => asset.Id == containerId, cancellationToken);
+        if (parent is null || parent.Kind != AssetKinds.Zip || parent.SourcePath is null)
+        {
+            return new ScanSummary();
+        }
+
+        parent.SourceType = AssetSourceTypes.ZipArchive;
+        parent.ScanError = null;
+
+        var assets = await db.Assets.ToDictionaryAsync(asset => asset.StableKey, cancellationToken);
+        MarkArchiveDescendantsUnavailable(assets.Values, parent.StableKey);
+
+        if (parent.IsIgnored)
+        {
+            await db.SaveChangesAsync(cancellationToken);
+            progress?.Report(new ScanProgress("Archive ignored", parent.RelativePath, 0, 0, 0));
+            return new ScanSummary();
+        }
+
+        var summary = new ScanSummary();
+        var entryChain = string.IsNullOrWhiteSpace(parent.EntryChain)
+            ? []
+            : parent.EntryChain.Split('\n', StringSplitOptions.RemoveEmptyEntries);
+
+        progress?.Report(new ScanProgress("Scanning archive", parent.RelativePath, 0, 0, 0));
+        await ScanZipFileAsync(db, assets, parent, parent.SourcePath, entryChain, parent.Depth + 1, summary, progress, cancellationToken);
+        MarkMissingArchiveDescendantsUnavailable(assets.Values);
+
+        if (pruneUnavailable)
+        {
+            progress?.Report(new ScanProgress("Pruning missing archive entries", parent.RelativePath, summary.Images, summary.Containers, summary.Errors));
+            await db.SaveChangesAsync(cancellationToken);
+            db.ChangeTracker.Clear();
+            summary.Pruned = await PruneUnavailableAsync(db, MutationBatchSize, cancellationToken);
+        }
+
+        await db.SaveChangesAsync(cancellationToken);
+        progress?.Report(new ScanProgress("Archive scan complete", parent.RelativePath, summary.Images, summary.Containers, summary.Errors));
+        return summary;
+    }
+
+    private async Task<bool> ScanZipPreviewAsync(
+        LibraryDbContext db,
+        Dictionary<string, LibraryAsset> assets,
+        LibraryAsset parent,
+        string zipPath,
+        IReadOnlyList<string> entryChain,
+        string archiveDisplayPath,
+        int depth,
+        ScanSummary summary,
+        IProgress<ScanProgress>? progress,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            using var zipStream = OpenArchiveStream(zipPath, entryChain);
+            using var archive = ArchiveFactory.OpenArchive(zipStream, new ReaderOptions());
+            return await ScanZipPreviewEntriesAsync(db, assets, parent, zipPath, entryChain, archiveDisplayPath, archive, depth, summary, progress, cancellationToken);
+        }
+        catch (Exception ex) when (ex is IOException or InvalidDataException or UnauthorizedAccessException or SharpCompressException)
+        {
+            parent.ScanError = ex.Message;
+            summary.Errors++;
+            logger.LogWarning(ex, "Unable to scan archive preview {ZipPath}", zipPath);
+            return false;
+        }
+    }
+
+    private async Task<bool> ScanZipPreviewEntriesAsync(
+        LibraryDbContext db,
+        Dictionary<string, LibraryAsset> assets,
+        LibraryAsset parent,
+        string zipPath,
+        IReadOnlyList<string> entryChain,
+        string archiveDisplayPath,
+        IArchive archive,
+        int depth,
+        ScanSummary summary,
+        IProgress<ScanProgress>? progress,
+        CancellationToken cancellationToken)
+    {
+        foreach (var entry in archive.Entries)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (entry.IsDirectory || string.IsNullOrWhiteSpace(entry.Key))
+            {
+                continue;
+            }
+
+            var entryName = LastArchivePathSegment(entry.Key);
+            var nextChain = entryChain.Concat([entry.Key]).ToArray();
+            var relativePath = $"{archiveDisplayPath}!{entry.Key}";
+
+            if (ImageFormat.IsMedia(entryName))
+            {
+                var mediaKind = ImageFormat.MediaKindFor(entryName);
+                var stableEntryPath = string.Join("!", nextChain);
+                Upsert(
+                    db,
+                    assets,
+                    stableKey: $"{parent.StableKey}!preview:{stableEntryPath}",
+                    parent: parent,
+                    name: BuildArchiveMediaDisplayName(nextChain, entryName),
+                    kind: mediaKind,
+                    sourceType: ArchiveMediaSourceType(mediaKind, entryChain.Count > 0),
+                    sourcePath: zipPath,
+                    entryChain: string.Join('\n', nextChain),
+                    relativePath: relativePath,
+                    contentType: ImageFormat.ContentTypeFor(entryName),
+                    sizeBytes: entry.Size,
+                    modifiedAt: ArchiveModifiedAt(entry),
+                    depth: depth);
+
+                summary.Images++;
+                progress?.Report(new ScanProgress("Found archive preview", relativePath, summary.Images, summary.Containers, summary.Errors));
+                return true;
+            }
+
+            if (ImageFormat.IsArchive(entryName) && depth < _options.MaxNestedZipDepth)
+            {
+                if (IsArchiveEntryIgnored(assets, parent.StableKey, nextChain))
+                {
+                    progress?.Report(new ScanProgress("Skipped ignored nested archive", relativePath, summary.Images, summary.Containers, summary.Errors));
+                    continue;
+                }
+
+                var found = await ScanNestedZipPreviewEntryAsync(db, assets, parent, zipPath, nextChain, relativePath, entry, depth + 1, summary, progress, cancellationToken);
+                if (found)
+                {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    private async Task<bool> ScanNestedZipPreviewEntryAsync(
+        LibraryDbContext db,
+        Dictionary<string, LibraryAsset> assets,
+        LibraryAsset parent,
+        string zipPath,
+        IReadOnlyList<string> entryChain,
+        string archiveDisplayPath,
+        IArchiveEntry zipEntry,
+        int depth,
+        ScanSummary summary,
+        IProgress<ScanProgress>? progress,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            if (zipEntry.Size > _options.MaxNestedZipBytesInMemory)
+            {
+                summary.Errors++;
+                logger.LogWarning(
+                    "Skipped nested archive preview {ArchivePath} because it is {NestedZipBytes} bytes and the configured in-memory limit is {MaxNestedZipBytesInMemory} bytes.",
+                    archiveDisplayPath,
+                    zipEntry.Size,
+                    _options.MaxNestedZipBytesInMemory);
+                return false;
+            }
+
+            using var nestedZipStream = new MemoryStream();
+            await using (var entryStream = await zipEntry.OpenEntryStreamAsync(cancellationToken))
+            {
+                await entryStream.CopyToAsync(nestedZipStream, cancellationToken);
+            }
+
+            nestedZipStream.Position = 0;
+            using var nestedArchive = ArchiveFactory.OpenArchive(nestedZipStream, new ReaderOptions());
+            return await ScanZipPreviewEntriesAsync(db, assets, parent, zipPath, entryChain, archiveDisplayPath, nestedArchive, depth, summary, progress, cancellationToken);
+        }
+        catch (Exception ex) when (ex is IOException or InvalidDataException or UnauthorizedAccessException or SharpCompressException)
+        {
+            logger.LogWarning(ex, "Unable to scan nested archive preview {ArchivePath}", archiveDisplayPath);
+            return false;
+        }
+    }
+
+    private async Task<FileSystemDiscovery> DiscoverFileSystemAssetsAsync(
+        string rootPath,
+        IProgress<ScanProgress>? progress,
+        CancellationToken cancellationToken)
+    {
+        var discovery = new FileSystemDiscovery();
+        var targets = Channel.CreateUnbounded<DirectoryScanTarget>(new UnboundedChannelOptions
+        {
+            SingleReader = false,
+            SingleWriter = false
+        });
+
+        var pendingTargets = 1;
+        await targets.Writer.WriteAsync(new DirectoryScanTarget($"folder:{rootPath}", rootPath, 0), cancellationToken);
+
+        var workers = Enumerable.Range(0, ScanParallelism)
+            .Select(_ => Task.Run(ProcessDirectoriesAsync, cancellationToken))
+            .ToArray();
+
+        await Task.WhenAll(workers);
+        return discovery;
+
+        async Task ProcessDirectoriesAsync()
+        {
+            await foreach (var target in targets.Reader.ReadAllAsync(cancellationToken))
+            {
+                try
+                {
+                    progress?.Report(new ScanProgress("Discovering folders", target.DirectoryPath, 0, 0, 0));
+                    await DiscoverDirectoryAsync(target);
+                }
+                finally
+                {
+                    if (Interlocked.Decrement(ref pendingTargets) == 0)
+                    {
+                        targets.Writer.TryComplete();
+                    }
+                }
+            }
+        }
+
+        async Task DiscoverDirectoryAsync(DirectoryScanTarget target)
+        {
+            string[] childDirectories;
+            string[] files;
+
+            try
+            {
+                childDirectories = Directory.GetDirectories(target.DirectoryPath);
+                files = Directory.GetFiles(target.DirectoryPath);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                discovery.DirectoryErrors.Add(new DirectoryScanError(target.StableKey, ex.Message));
+                return;
+            }
+
+            foreach (var childDirectory in childDirectories)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var directory = new DirectoryInfo(childDirectory);
+                if (string.Equals(directory.Name, ".imagevault", StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                var stableKey = $"folder:{directory.FullName}";
+                discovery.Folders.Add(new DiscoveredFolder(
+                    stableKey,
+                    target.StableKey,
+                    directory.Name,
+                    directory.FullName,
+                    Path.GetRelativePath(rootPath, directory.FullName),
+                    directory.LastWriteTimeUtc,
+                    target.Depth + 1));
+
+                Interlocked.Increment(ref pendingTargets);
+                await targets.Writer.WriteAsync(new DirectoryScanTarget(stableKey, directory.FullName, target.Depth + 1), cancellationToken);
+            }
+
+            foreach (var filePath in files)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                await DiscoverFileAsync(target, filePath);
+            }
+        }
+
+        async Task DiscoverFileAsync(DirectoryScanTarget parent, string filePath)
+        {
+            FileInfo file;
+            try
+            {
+                file = new FileInfo(filePath);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                discovery.FileErrors.Add(new FileScanError(filePath, Path.GetRelativePath(rootPath, filePath), "Unable to inspect file"));
+                logger.LogWarning(ex, "Unable to inspect file {FilePath}", filePath);
+                return;
+            }
+
+            if (ImageFormat.IsMedia(filePath))
+            {
+                try
+                {
+                    var mediaKind = ImageFormat.MediaKindFor(file.Name);
+                    discovery.MediaFiles.Add(new DiscoveredMediaFile(
+                        parent.StableKey,
+                        file.Name,
+                        mediaKind,
+                        file.FullName,
+                        Path.GetRelativePath(rootPath, file.FullName),
+                        ImageFormat.ContentTypeFor(file.Name),
+                        file.Length,
+                        file.LastWriteTimeUtc,
+                        parent.Depth + 1));
+                }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                {
+                    discovery.FileErrors.Add(new FileScanError(file.FullName, Path.GetRelativePath(rootPath, file.FullName), "Unable to read media metadata"));
+                    logger.LogWarning(ex, "Unable to read media metadata {FilePath}", file.FullName);
+                }
+
+                return;
+            }
+
+            if (!ImageFormat.IsArchive(filePath))
+            {
+                return;
+            }
+
+            try
+            {
+                var stableKey = await CreateArchiveStableKeyAsync(file, cancellationToken);
+                discovery.ArchiveFiles.Add(new DiscoveredArchiveFile(
+                    stableKey,
+                    parent.StableKey,
+                    file.Name,
+                    file.FullName,
+                    Path.GetRelativePath(rootPath, file.FullName),
+                    file.Length,
+                    file.LastWriteTimeUtc,
+                    parent.Depth + 1));
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                discovery.FileErrors.Add(new FileScanError(file.FullName, Path.GetRelativePath(rootPath, file.FullName), "Unable to read archive"));
+                logger.LogWarning(ex, "Unable to fingerprint archive {ArchivePath}", file.FullName);
+            }
+        }
+    }
+
+    private async Task ApplyFileSystemDiscoveryAsync(
+        LibraryDbContext db,
+        Dictionary<string, LibraryAsset> assets,
+        LibraryAsset parent,
+        FileSystemDiscovery discovery,
+        ScanSummary summary,
+        IProgress<ScanProgress>? progress,
+        CancellationToken cancellationToken)
+    {
+        var foldersByKey = new Dictionary<string, LibraryAsset>(StringComparer.Ordinal)
+        {
+            [parent.StableKey] = parent
+        };
+
+        foreach (var folder in discovery.Folders
+            .OrderBy(folder => folder.Depth)
+            .ThenBy(folder => folder.RelativePath, StringComparer.Ordinal))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!foldersByKey.TryGetValue(folder.ParentStableKey, out var folderParent))
+            {
+                continue;
+            }
+
+            var child = Upsert(
+                db,
+                assets,
+                stableKey: folder.StableKey,
+                parent: folderParent,
+                name: folder.Name,
+                kind: AssetKinds.Folder,
+                sourceType: AssetSourceTypes.FileSystemFolder,
+                sourcePath: folder.FullPath,
+                entryChain: null,
+                relativePath: folder.RelativePath,
+                contentType: null,
+                sizeBytes: null,
+                modifiedAt: folder.ModifiedAt,
+                depth: folder.Depth);
+
+            foldersByKey[folder.StableKey] = child;
+            summary.Containers++;
+            progress?.Report(new ScanProgress("Scanning folders", child.RelativePath, summary.Images, summary.Containers, summary.Errors));
+            await FlushScanBatchAsync(db, summary, SaveBatchSize, cancellationToken);
+        }
+
+        foreach (var error in discovery.DirectoryErrors.OrderBy(error => error.StableKey, StringComparer.Ordinal))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (foldersByKey.TryGetValue(error.StableKey, out var folder))
+            {
+                folder.ScanError = error.Message;
+            }
+
+            summary.Errors++;
+        }
+
+        foreach (var error in discovery.FileErrors.OrderBy(error => error.RelativePath, StringComparer.Ordinal))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            summary.Errors++;
+            progress?.Report(new ScanProgress(error.ProgressPhase, error.RelativePath, summary.Images, summary.Containers, summary.Errors));
+        }
+
+        foreach (var mediaFile in discovery.MediaFiles.OrderBy(file => file.RelativePath, StringComparer.Ordinal))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!foldersByKey.TryGetValue(mediaFile.ParentStableKey, out var mediaParent))
+            {
+                continue;
+            }
+
+            Upsert(
+                db,
+                assets,
+                stableKey: $"file:{mediaFile.FullPath}",
+                parent: mediaParent,
+                name: mediaFile.Name,
+                kind: mediaFile.Kind,
+                sourceType: FileSystemMediaSourceType(mediaFile.Kind),
+                sourcePath: mediaFile.FullPath,
+                entryChain: null,
+                relativePath: mediaFile.RelativePath,
+                contentType: mediaFile.ContentType,
+                sizeBytes: mediaFile.SizeBytes,
+                modifiedAt: mediaFile.ModifiedAt,
+                depth: mediaFile.Depth);
+
+            summary.Images++;
+            progress?.Report(new ScanProgress("Scanning loose media", mediaFile.RelativePath, summary.Images, summary.Containers, summary.Errors));
+            await FlushScanBatchAsync(db, summary, SaveBatchSize, cancellationToken);
+        }
+
+        foreach (var archiveFile in discovery.ArchiveFiles.OrderBy(file => file.RelativePath, StringComparer.Ordinal))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!foldersByKey.TryGetValue(archiveFile.ParentStableKey, out var archiveParent))
+            {
+                continue;
+            }
+
+            if (assets.TryGetValue(archiveFile.StableKey, out var existingZipAsset) && existingZipAsset.IsAvailable)
+            {
+                progress?.Report(new ScanProgress("Skipped duplicate archive", archiveFile.RelativePath, summary.Images, summary.Containers, summary.Errors));
+                continue;
+            }
+
+            assets.TryGetValue(archiveFile.StableKey, out var previousArchiveAsset);
+            var previousArchiveSourcePath = previousArchiveAsset?.SourcePath;
+            var previousArchiveRelativePath = previousArchiveAsset?.RelativePath;
+
+            var zipAsset = Upsert(
+                db,
+                assets,
+                stableKey: archiveFile.StableKey,
+                parent: archiveParent,
+                name: archiveFile.Name,
+                kind: AssetKinds.Zip,
+                sourceType: AssetSourceTypes.ZipArchivePreview,
+                sourcePath: archiveFile.FullPath,
+                entryChain: null,
+                relativePath: archiveFile.RelativePath,
+                contentType: null,
+                sizeBytes: archiveFile.SizeBytes,
+                modifiedAt: archiveFile.ModifiedAt,
+                depth: archiveFile.Depth);
+
+            summary.Containers++;
+            if (!string.Equals(previousArchiveSourcePath, zipAsset.SourcePath, StringComparison.Ordinal) ||
+                !string.Equals(previousArchiveRelativePath, zipAsset.RelativePath, StringComparison.Ordinal))
+            {
+                UpdateArchiveDescendantPaths(assets.Values, zipAsset.StableKey, zipAsset.SourcePath, previousArchiveRelativePath, zipAsset.RelativePath);
+            }
+
+            progress?.Report(new ScanProgress("Found archive", zipAsset.RelativePath, summary.Images, summary.Containers, summary.Errors));
+            if (zipAsset.IsIgnored)
+            {
+                MarkArchiveDescendantsUnavailable(assets.Values, zipAsset.StableKey);
+                progress?.Report(new ScanProgress("Skipped ignored archive", zipAsset.RelativePath, summary.Images, summary.Containers, summary.Errors));
+            }
+            else if (ArchiveHasAvailablePreview(assets.Values, zipAsset.StableKey))
+            {
+                progress?.Report(new ScanProgress("Reused archive preview", zipAsset.RelativePath, summary.Images, summary.Containers, summary.Errors));
+            }
+            else
+            {
+                await ScanZipPreviewAsync(db, assets, zipAsset, archiveFile.FullPath, [], zipAsset.RelativePath, 1, summary, progress, cancellationToken);
+            }
+
+            await FlushScanBatchAsync(db, summary, SaveBatchSize, cancellationToken);
+        }
+    }
+
+    private async Task ScanZipFileAsync(
+        LibraryDbContext db,
+        Dictionary<string, LibraryAsset> assets,
+        LibraryAsset parent,
+        string zipPath,
+        IReadOnlyList<string> entryChain,
+        int depth,
+        ScanSummary summary,
+        IProgress<ScanProgress>? progress,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            using var zipStream = OpenArchiveStream(zipPath, entryChain);
+            using var archive = ArchiveFactory.OpenArchive(zipStream, new ReaderOptions());
+            await ScanZipEntriesAsync(db, assets, parent, zipPath, entryChain, parent.RelativePath, archive, depth, summary, progress, cancellationToken);
+        }
+        catch (Exception ex) when (ex is IOException or InvalidDataException or UnauthorizedAccessException or SharpCompressException)
+        {
+            parent.ScanError = ex.Message;
+            summary.Errors++;
+            logger.LogWarning(ex, "Unable to scan archive {ZipPath}", zipPath);
+        }
+    }
+
+    private async Task ScanZipEntriesAsync(
+        LibraryDbContext db,
+        Dictionary<string, LibraryAsset> assets,
+        LibraryAsset parent,
+        string zipPath,
+        IReadOnlyList<string> entryChain,
+        string archiveDisplayPath,
+        IArchive archive,
+        int depth,
+        ScanSummary summary,
+        IProgress<ScanProgress>? progress,
+        CancellationToken cancellationToken)
+    {
+        foreach (var entry in archive.Entries)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (entry.IsDirectory || string.IsNullOrWhiteSpace(entry.Key))
+            {
+                continue;
+            }
+
+            var entryName = LastArchivePathSegment(entry.Key);
+            var nextChain = entryChain.Concat([entry.Key]).ToArray();
+            var relativePath = $"{archiveDisplayPath}!{entry.Key}";
+            var entryParent = UpsertZipFolderParents(db, assets, parent, zipPath, archiveDisplayPath, entry.Key, depth);
+
+            if (ImageFormat.IsMedia(entryName))
+            {
+                var mediaKind = ImageFormat.MediaKindFor(entryName);
+                Upsert(
+                    db,
+                    assets,
+                    stableKey: $"{entryParent.StableKey}!{entryName}",
+                    parent: entryParent,
+                    name: BuildArchiveMediaDisplayName(nextChain, entryName),
+                    kind: mediaKind,
+                    sourceType: ArchiveMediaSourceType(mediaKind, entryChain.Count > 0),
+                    sourcePath: zipPath,
+                    entryChain: string.Join('\n', nextChain),
+                    relativePath: relativePath,
+                    contentType: ImageFormat.ContentTypeFor(entryName),
+                    sizeBytes: entry.Size,
+                    modifiedAt: ArchiveModifiedAt(entry),
+                    depth: depth);
+
+                summary.Images++;
+                await FlushScanBatchAsync(db, summary, SaveBatchSize, cancellationToken);
+                progress?.Report(new ScanProgress("Scanning archive", relativePath, summary.Images, summary.Containers, summary.Errors));
+                continue;
+            }
+
+            if (ImageFormat.IsArchive(entryName))
+            {
+                if (depth >= _options.MaxNestedZipDepth)
+                {
+                    logger.LogInformation(
+                        "Skipped nested archive {ArchivePath} because the configured depth limit is {MaxNestedZipDepth}.",
+                        relativePath,
+                        _options.MaxNestedZipDepth);
+                    continue;
+                }
+
+                var nestedZip = UpsertNestedZip(db, assets, entryParent, zipPath, nextChain, relativePath, entry, depth);
+                summary.Containers++;
+                await FlushScanBatchAsync(db, summary, SaveBatchSize, cancellationToken);
+
+                if (nestedZip.IsIgnored)
+                {
+                    MarkArchiveDescendantsUnavailable(assets.Values, nestedZip.StableKey);
+                    progress?.Report(new ScanProgress("Skipped ignored nested archive", relativePath, summary.Images, summary.Containers, summary.Errors));
+                    continue;
+                }
+
+                progress?.Report(new ScanProgress("Scanning nested archive", relativePath, summary.Images, summary.Containers, summary.Errors));
+                await ScanNestedZipEntryAsync(db, assets, nestedZip, zipPath, nextChain, relativePath, entry, depth + 1, summary, progress, cancellationToken);
+            }
+        }
+    }
+
+    private async Task ScanNestedZipEntryAsync(
+        LibraryDbContext db,
+        Dictionary<string, LibraryAsset> assets,
+        LibraryAsset parent,
+        string zipPath,
+        IReadOnlyList<string> entryChain,
+        string archiveDisplayPath,
+        IArchiveEntry zipEntry,
+        int depth,
+        ScanSummary summary,
+        IProgress<ScanProgress>? progress,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            if (zipEntry.Size > _options.MaxNestedZipBytesInMemory)
+            {
+                parent.ScanError = $"Skipped nested archive because it is larger than the configured in-memory limit: {archiveDisplayPath}";
+                summary.Errors++;
+                logger.LogWarning(
+                    "Skipped nested archive {ArchivePath} because it is {NestedZipBytes} bytes and the configured in-memory limit is {MaxNestedZipBytesInMemory} bytes.",
+                    archiveDisplayPath,
+                    zipEntry.Size,
+                    _options.MaxNestedZipBytesInMemory);
+                return;
+            }
+
+            using var nestedZipStream = new MemoryStream();
+            await using (var entryStream = await zipEntry.OpenEntryStreamAsync(cancellationToken))
+            {
+                await entryStream.CopyToAsync(nestedZipStream, cancellationToken);
+            }
+
+            nestedZipStream.Position = 0;
+            using var nestedArchive = ArchiveFactory.OpenArchive(nestedZipStream, new ReaderOptions());
+            await ScanZipEntriesAsync(db, assets, parent, zipPath, entryChain, archiveDisplayPath, nestedArchive, depth, summary, progress, cancellationToken);
+        }
+        catch (Exception ex) when (ex is IOException or InvalidDataException or UnauthorizedAccessException or SharpCompressException)
+        {
+            parent.ScanError = $"Unable to scan nested archive: {archiveDisplayPath}";
+            summary.Errors++;
+            logger.LogWarning(ex, "Unable to scan nested archive {ArchivePath}", archiveDisplayPath);
+        }
+    }
+
+    private int SaveBatchSize => Math.Max(1, _options.ScanSaveBatchSize);
+
+    private int ScanParallelism => Math.Min(Math.Max(1, _options.ScanParallelism), 64);
+
+    private int MutationBatchSize => Math.Max(1, _options.DatabaseMutationBatchSize);
+
+    private static async Task FlushScanBatchAsync(LibraryDbContext db, ScanSummary summary, int batchSize, CancellationToken cancellationToken)
+    {
+        var scanned = summary.Images + summary.Containers;
+        if (scanned == 1 || scanned % batchSize == 0)
+        {
+            await db.SaveChangesAsync(cancellationToken);
+        }
+    }
+
+    private static Stream OpenArchiveStream(string archivePath, IReadOnlyList<string> entryChain)
+    {
+        if (entryChain.Count == 0)
+        {
+            return File.OpenRead(archivePath);
+        }
+
+        Stream current = File.OpenRead(archivePath);
+        try
+        {
+            foreach (var entryPath in entryChain)
+            {
+                using var archive = ArchiveFactory.OpenArchive(current, new ReaderOptions());
+                var entry = archive.Entries.FirstOrDefault(entry => string.Equals(entry.Key, entryPath, StringComparison.Ordinal))
+                    ?? throw new InvalidDataException($"Missing nested archive entry: {entryPath}");
+                var next = new MemoryStream();
+                using (var entryStream = entry.OpenEntryStream())
+                {
+                    entryStream.CopyTo(next);
+                }
+
+                current.Dispose();
+                next.Position = 0;
+                current = next;
+            }
+
+            return current;
+        }
+        catch
+        {
+            current.Dispose();
+            throw;
+        }
+    }
+
+    private static async Task<string> CreateArchiveStableKeyAsync(FileInfo file, CancellationToken cancellationToken)
+    {
+        await using var stream = file.OpenRead();
+        using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        var buffer = new byte[128 * 1024];
+
+        while (true)
+        {
+            var bytesRead = await stream.ReadAsync(buffer, cancellationToken);
+            if (bytesRead == 0)
+            {
+                break;
+            }
+
+            hash.AppendData(buffer.AsSpan(0, bytesRead));
+        }
+
+        return $"{ImageFormat.ArchiveStableKeyPrefix(file.Name)}:{Convert.ToHexString(hash.GetHashAndReset())}";
+    }
+
+    private static LibraryAsset UpsertNestedZip(
+        LibraryDbContext db,
+        Dictionary<string, LibraryAsset> assets,
+        LibraryAsset parent,
+        string zipPath,
+        IReadOnlyList<string> entryChain,
+        string relativePath,
+        IArchiveEntry entry,
+        int depth)
+    {
+        var entryName = LastArchivePathSegment(entry.Key ?? string.Empty);
+        return Upsert(
+            db,
+            assets,
+            stableKey: $"{parent.StableKey}!{entryName}",
+            parent: parent,
+            name: entryName,
+            kind: AssetKinds.Zip,
+            sourceType: AssetSourceTypes.NestedZipArchive,
+            sourcePath: zipPath,
+            entryChain: string.Join('\n', entryChain),
+            relativePath: relativePath,
+            contentType: null,
+            sizeBytes: entry.Size,
+            modifiedAt: ArchiveModifiedAt(entry),
+            depth: depth);
+    }
+
+    private static LibraryAsset UpsertZipFolderParents(
+        LibraryDbContext db,
+        Dictionary<string, LibraryAsset> assets,
+        LibraryAsset archiveParent,
+        string zipPath,
+        string archiveDisplayPath,
+        string entryFullName,
+        int depth)
+    {
+        var parts = entryFullName
+            .Split(['/', '\\'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
+        if (parts.Length <= 1)
+        {
+            return archiveParent;
+        }
+
+        var parent = archiveParent;
+        var displayPath = archiveDisplayPath;
+        for (var index = 0; index < parts.Length - 1; index++)
+        {
+            var folderName = parts[index];
+            displayPath = $"{displayPath}!{folderName}";
+            parent = Upsert(
+                db,
+                assets,
+                stableKey: $"{parent.StableKey}!folder:{folderName}",
+                parent: parent,
+                name: folderName,
+                kind: AssetKinds.Folder,
+                sourceType: AssetSourceTypes.ZipFolderEntry,
+                sourcePath: zipPath,
+                entryChain: null,
+                relativePath: displayPath,
+                contentType: null,
+                sizeBytes: null,
+                modifiedAt: null,
+                depth: depth + index);
+        }
+
+        return parent;
+    }
+
+    private static string FileSystemMediaSourceType(string mediaKind)
+    {
+        return mediaKind switch
+        {
+            AssetKinds.Audio => AssetSourceTypes.FileSystemAudio,
+            AssetKinds.Video => AssetSourceTypes.FileSystemVideo,
+            _ => AssetSourceTypes.FileSystemImage
+        };
+    }
+
+    private static string ArchiveMediaSourceType(string mediaKind, bool nested)
+    {
+        return mediaKind switch
+        {
+            AssetKinds.Audio => nested ? AssetSourceTypes.NestedZipAudioEntry : AssetSourceTypes.ZipAudioEntry,
+            AssetKinds.Video => nested ? AssetSourceTypes.NestedZipVideoEntry : AssetSourceTypes.ZipVideoEntry,
+            _ => nested ? AssetSourceTypes.NestedZipImageEntry : AssetSourceTypes.ZipImageEntry
+        };
+    }
+
+    private static string BuildArchiveMediaDisplayName(IReadOnlyList<string> entryChain, string mediaName)
+    {
+        if (entryChain.Count <= 1)
+        {
+            return mediaName;
+        }
+
+        var nestedZipNames = entryChain
+            .Take(entryChain.Count - 1)
+            .Where(ImageFormat.IsArchive)
+            .Select(LastArchivePathSegment)
+            .ToArray();
+
+        return nestedZipNames.Length == 0
+            ? mediaName
+            : $"{string.Join(" / ", nestedZipNames)} / {mediaName}";
+    }
+
+    private static string LastArchivePathSegment(string path)
+    {
+        var normalized = path.Replace('\\', '/');
+        var lastSeparator = normalized.LastIndexOf('/');
+        return lastSeparator < 0 ? normalized : normalized[(lastSeparator + 1)..];
+    }
+
+    private static DateTimeOffset? ArchiveModifiedAt(IArchiveEntry entry)
+    {
+        if (entry.LastModifiedTime is not { } value)
+        {
+            return null;
+        }
+
+        var specified = value.Kind == DateTimeKind.Unspecified
+            ? DateTime.SpecifyKind(value, DateTimeKind.Local)
+            : value;
+
+        return new DateTimeOffset(specified);
+    }
+
+    private static bool IsArchiveEntryIgnored(
+        Dictionary<string, LibraryAsset> assets,
+        string rootArchiveStableKey,
+        IReadOnlyList<string> entryChain)
+    {
+        var stableKey = BuildArchiveEntryContainerStableKey(rootArchiveStableKey, entryChain);
+        return assets.TryGetValue(stableKey, out var asset) && asset.IsIgnored;
+    }
+
+    private static bool ArchiveHasAvailablePreview(IEnumerable<LibraryAsset> assets, string archiveStableKey)
+    {
+        var previewPrefix = archiveStableKey + "!preview:";
+        return assets.Any(asset =>
+            asset.IsAvailable &&
+            asset.IsMedia &&
+            asset.StableKey.StartsWith(previewPrefix, StringComparison.Ordinal));
+    }
+
+    private static void UpdateArchiveDescendantPaths(
+        IEnumerable<LibraryAsset> assets,
+        string archiveStableKey,
+        string? sourcePath,
+        string? oldArchiveRelativePath,
+        string newArchiveRelativePath)
+    {
+        var descendantPrefix = archiveStableKey + "!";
+        foreach (var asset in assets.Where(asset => asset.StableKey.StartsWith(descendantPrefix, StringComparison.Ordinal)))
+        {
+            asset.SourcePath = sourcePath;
+            if (!string.IsNullOrWhiteSpace(oldArchiveRelativePath) &&
+                asset.RelativePath.StartsWith(oldArchiveRelativePath + "!", StringComparison.Ordinal))
+            {
+                asset.RelativePath = newArchiveRelativePath + asset.RelativePath[oldArchiveRelativePath.Length..];
+            }
+        }
+    }
+
+    private static string BuildArchiveEntryContainerStableKey(string rootArchiveStableKey, IReadOnlyList<string> entryChain)
+    {
+        var stableKey = rootArchiveStableKey;
+        foreach (var entryPath in entryChain)
+        {
+            var parts = entryPath
+                .Split(['/', '\\'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
+            if (parts.Length == 0)
+            {
+                continue;
+            }
+
+            foreach (var folder in parts.Take(parts.Length - 1))
+            {
+                stableKey = $"{stableKey}!folder:{folder}";
+            }
+
+            stableKey = $"{stableKey}!{parts[^1]}";
+        }
+
+        return stableKey;
+    }
+
+    private static void MarkRootScanTargetsUnavailable(IEnumerable<LibraryAsset> assets)
+    {
+        foreach (var asset in assets.Where(IsRootScanTarget))
+        {
+            asset.IsAvailable = false;
+            asset.ScanError = null;
+        }
+    }
+
+    private static bool IsRootScanTarget(LibraryAsset asset)
+    {
+        if (asset.SourceType is AssetSourceTypes.FileSystemFolder or
+            AssetSourceTypes.FileSystemImage or
+            AssetSourceTypes.FileSystemAudio or
+            AssetSourceTypes.FileSystemVideo)
+        {
+            return true;
+        }
+
+        return asset.Kind == AssetKinds.Zip && string.IsNullOrWhiteSpace(asset.EntryChain);
+    }
+
+    private static void MarkArchiveDescendantsUnavailable(IEnumerable<LibraryAsset> assets, string archiveStableKey)
+    {
+        var prefix = archiveStableKey + "!";
+        foreach (var asset in assets.Where(asset => asset.StableKey.StartsWith(prefix, StringComparison.Ordinal)))
+        {
+            asset.IsAvailable = false;
+            asset.ScanError = null;
+        }
+    }
+
+    private static void MarkMissingArchiveDescendantsUnavailable(IEnumerable<LibraryAsset> assets)
+    {
+        var assetList = assets.ToList();
+        var missingArchives = assetList
+            .Where(asset => asset.Kind == AssetKinds.Zip && !asset.IsAvailable)
+            .Select(asset => asset.StableKey + "!")
+            .ToArray();
+
+        if (missingArchives.Length == 0)
+        {
+            return;
+        }
+
+        foreach (var asset in assetList.Where(asset => missingArchives.Any(prefix => asset.StableKey.StartsWith(prefix, StringComparison.Ordinal))))
+        {
+            asset.IsAvailable = false;
+            asset.ScanError = null;
+        }
+    }
+
+    private static async Task<int> PruneUnavailableAsync(LibraryDbContext db, int batchSize, CancellationToken cancellationToken)
+    {
+        var pruned = 0;
+
+        while (true)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var leafIds = await db.Assets
+                .Where(asset => !asset.IsAvailable && !db.Assets.Any(child => child.ParentId == asset.Id))
+                .Select(asset => asset.Id)
+                .Take(batchSize)
+                .ToListAsync(cancellationToken);
+
+            if (leafIds.Count == 0)
+            {
+                return pruned;
+            }
+
+            pruned += await db.Assets
+                .Where(asset => leafIds.Contains(asset.Id))
+                .ExecuteDeleteAsync(cancellationToken);
+        }
+    }
+
+    private static async Task<int> DeleteAllAssetsAsync(LibraryDbContext db, int batchSize, CancellationToken cancellationToken)
+    {
+        var deleted = 0;
+
+        while (true)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var leafIds = await db.Assets
+                .Where(asset => !db.Assets.Any(child => child.ParentId == asset.Id))
+                .Select(asset => asset.Id)
+                .Take(batchSize)
+                .ToListAsync(cancellationToken);
+
+            if (leafIds.Count == 0)
+            {
+                return deleted;
+            }
+
+            deleted += await db.Assets
+                .Where(asset => leafIds.Contains(asset.Id))
+                .ExecuteDeleteAsync(cancellationToken);
+        }
+    }
+
+    private static LibraryAsset Upsert(
+        LibraryDbContext db,
+        Dictionary<string, LibraryAsset> assets,
+        string stableKey,
+        LibraryAsset? parent,
+        string name,
+        string kind,
+        string sourceType,
+        string? sourcePath,
+        string? entryChain,
+        string relativePath,
+        string? contentType,
+        long? sizeBytes,
+        DateTimeOffset? modifiedAt,
+        int depth)
+    {
+        if (!assets.TryGetValue(stableKey, out var asset))
+        {
+            asset = new LibraryAsset
+            {
+                StableKey = stableKey,
+                Name = name,
+                Kind = kind,
+                SourceType = sourceType
+            };
+
+            assets.Add(stableKey, asset);
+            db.Assets.Add(asset);
+        }
+
+        asset.Parent = parent;
+        asset.Name = name;
+        asset.Kind = kind;
+        asset.SourceType = sourceType;
+        asset.SourcePath = sourcePath;
+        asset.EntryChain = entryChain;
+        asset.RelativePath = relativePath;
+        asset.SortKey = NaturalSortKey.Build(string.IsNullOrWhiteSpace(relativePath) ? name : relativePath);
+        asset.ContentType = contentType;
+        asset.SizeBytes = sizeBytes;
+        asset.ModifiedAt = modifiedAt;
+        asset.Depth = depth;
+        asset.IsAvailable = true;
+        asset.ScanError = null;
+        asset.UpdatedAt = DateTimeOffset.UtcNow;
+
+        return asset;
+    }
+}
+
+internal sealed class FileSystemDiscovery
+{
+    public ConcurrentBag<DiscoveredFolder> Folders { get; } = [];
+
+    public ConcurrentBag<DiscoveredMediaFile> MediaFiles { get; } = [];
+
+    public ConcurrentBag<DiscoveredArchiveFile> ArchiveFiles { get; } = [];
+
+    public ConcurrentBag<DirectoryScanError> DirectoryErrors { get; } = [];
+
+    public ConcurrentBag<FileScanError> FileErrors { get; } = [];
+}
+
+internal sealed record DirectoryScanTarget(
+    string StableKey,
+    string DirectoryPath,
+    int Depth);
+
+internal sealed record DiscoveredFolder(
+    string StableKey,
+    string ParentStableKey,
+    string Name,
+    string FullPath,
+    string RelativePath,
+    DateTimeOffset? ModifiedAt,
+    int Depth);
+
+internal sealed record DiscoveredMediaFile(
+    string ParentStableKey,
+    string Name,
+    string Kind,
+    string FullPath,
+    string RelativePath,
+    string? ContentType,
+    long SizeBytes,
+    DateTimeOffset? ModifiedAt,
+    int Depth);
+
+internal sealed record DiscoveredArchiveFile(
+    string StableKey,
+    string ParentStableKey,
+    string Name,
+    string FullPath,
+    string RelativePath,
+    long SizeBytes,
+    DateTimeOffset? ModifiedAt,
+    int Depth);
+
+internal sealed record DirectoryScanError(
+    string StableKey,
+    string Message);
+
+internal sealed record FileScanError(
+    string Path,
+    string RelativePath,
+    string ProgressPhase);
+
+public sealed class ScanSummary
+{
+    public int Images { get; set; }
+
+    public int Containers { get; set; }
+
+    public int Errors { get; set; }
+
+    public int Pruned { get; set; }
+}
+
+public sealed record ScanProgress(
+    string Phase,
+    string CurrentItem,
+    int Images,
+    int Containers,
+    int Errors);
