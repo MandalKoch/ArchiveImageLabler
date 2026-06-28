@@ -1,6 +1,6 @@
 using System.ComponentModel.DataAnnotations;
 
-namespace FileZipPreview.Models;
+namespace ArchiveImageLabler.Models;
 
 public sealed class LibraryAsset
 {

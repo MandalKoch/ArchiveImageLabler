@@ -1,6 +1,6 @@
-# FileZipPreview
+# ArchiveImageLabler
 
-FileZipPreview is a local-first media library for large folders that contain loose images, audio, videos, zip/rar archives, archive folders, and archives inside other archives. It runs as a Dockerized .NET 10 Blazor app, opens in your browser at `localhost`, and keeps your original media folder mounted read-only.
+ArchiveImageLabler is a local-first media library for large folders that contain loose images, audio, videos, zip/rar archives, archive folders, and archives inside other archives. It runs as a Dockerized .NET 10 Blazor app, opens in your browser at `localhost`, and keeps your original media folder mounted read-only.
 
 The app is built for browsing first: scan a mounted folder, see previews immediately, open sources as pages, view images larger, play audio/video, and add your own tags, descriptions, and 1-5 star ratings.
 
@@ -32,13 +32,13 @@ The Compose file stays in the repository root. The Dockerfile lives next to the 
 ```text
 Host folder       Docker container
 ./library   ->    /library        read-only media library
-./library/.imagevault -> /app/data SQLite database and app keys
+./library/.archiveimagelabler -> /app/data SQLite database and app keys
 ```
 
 SQLite is stored at:
 
 ```text
-/app/data/filezippreview.db
+/app/data/archiveimagelabler.db
 ```
 
 The default browser URL is:
@@ -52,11 +52,11 @@ Docker Compose binds the app to `127.0.0.1` only, so it is not exposed to your L
 ## Quick Start
 
 1. Copy [.env.example](.env.example) to `.env`.
-2. Set `IMAGEVAULT_LIBRARY_PATH` to your real media folder and `IMAGEVAULT_DATA_PATH` to a writable `.imagevault` folder beside it:
+2. Set `ARCHIVEIMAGELABLER_LIBRARY_PATH` to your real media folder and `ARCHIVEIMAGELABLER_DATA_PATH` to a writable `.archiveimagelabler` folder beside it:
 
 ```env
-IMAGEVAULT_LIBRARY_PATH=D:/Images
-IMAGEVAULT_DATA_PATH=D:/Images/.imagevault
+ARCHIVEIMAGELABLER_LIBRARY_PATH=D:/Images
+ARCHIVEIMAGELABLER_DATA_PATH=D:/Images/.archiveimagelabler
 Library__ScanParallelism=4
 ```
 
@@ -97,7 +97,7 @@ For debugging, the intended development path is the Aspire AppHost in [apphost](
 Run the Aspire AppHost:
 
 ```powershell
-dotnet run --project .\apphost\FileZipPreview.AppHost.csproj
+dotnet run --project .\apphost\ArchiveImageLabler.AppHost.csproj
 ```
 
 For local non-Docker runs, the development config points at:
@@ -142,7 +142,7 @@ Remove the SQLite/app-data volume:
 docker compose down
 ```
 
-SQLite and app keys live in the host data folder configured by `IMAGEVAULT_DATA_PATH`.
+SQLite and app keys live in the host data folder configured by `ARCHIVEIMAGELABLER_DATA_PATH`.
 
 Health check endpoint:
 
@@ -156,13 +156,13 @@ Rider is the primary IDE for this repository.
 
 Shared Rider run/debug profiles are stored in [.run](.run):
 
-- `FileZipPreview: Aspire AppHost`
-- `FileZipPreview: local http`
-- `FileZipPreview: Docker Compose`
+- `ArchiveImageLabler: Aspire AppHost`
+- `ArchiveImageLabler: local http`
+- `ArchiveImageLabler: Docker Compose`
 
 Development launch profiles enable `Debug__StopApplicationOnLastBrowserClose=true`. When the last Blazor browser tab/window closes, the app stops itself so the Rider debug session can end naturally. Docker runtime profiles do not enable this behavior.
 
-For Rider memory profiling and debug monitor, prefer `FileZipPreview: local http`. Aspire launches the Blazor app as a child resource process, and Docker runs it inside a container, so Rider may otherwise attach to the AppHost/container instead of the actual Blazor app process.
+For Rider memory profiling and debug monitor, prefer `ArchiveImageLabler: local http`. Aspire launches the Blazor app as a child resource process, and Docker runs it inside a container, so Rider may otherwise attach to the AppHost/container instead of the actual Blazor app process.
 
 If Rider complains that the `.NET Launch Settings Profile` configuration type is disabled, reload the project and make sure Rider's bundled .NET/ASP.NET support is enabled. The checked-in profiles use Rider's `.NET Launch Settings Profile` run configuration type.
 

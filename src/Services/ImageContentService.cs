@@ -1,8 +1,8 @@
-using FileZipPreview.Models;
+using ArchiveImageLabler.Models;
 using SharpCompress.Archives;
 using SharpCompress.Readers;
 
-namespace FileZipPreview.Services;
+namespace ArchiveImageLabler.Services;
 
 public sealed class ImageContentService
 {

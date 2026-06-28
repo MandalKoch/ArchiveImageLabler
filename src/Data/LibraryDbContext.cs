@@ -1,7 +1,7 @@
-using FileZipPreview.Models;
+using ArchiveImageLabler.Models;
 using Microsoft.EntityFrameworkCore;
 
-namespace FileZipPreview.Data;
+namespace ArchiveImageLabler.Data;
 
 public sealed class LibraryDbContext(DbContextOptions<LibraryDbContext> options) : DbContext(options)
 {

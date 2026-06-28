@@ -8,7 +8,7 @@
 - Docker Compose setup with:
   - App published on `http://localhost:5080` through a localhost-only port bind.
   - Read-only mounted media library at `/library`.
-  - Persistent SQLite/app data bind mount at `/app/data`, intended to point at `.imagevault` beside the media library.
+  - Persistent SQLite/app data bind mount at `/app/data`, intended to point at `.archiveimagelabler` beside the media library.
 - `.env.example` for local Docker settings.
 - Docker health check endpoint at `/health`.
 - Non-root container runtime user.

@@ -5,7 +5,7 @@
 @inject IJSRuntime JsRuntime
 @implements IAsyncDisposable
 
-<PageTitle>@(_source?.DisplayName ?? "Source") - FileZipPreview</PageTitle>
+<PageTitle>@(_source?.DisplayName ?? "Source") - ArchiveImageLabler</PageTitle>
 
 <div class="shell source-page">
     <header class="app-header">
@@ -660,7 +660,7 @@
         }
 
         _keyboardReference ??= DotNetObjectReference.Create(this);
-        await JsRuntime.InvokeVoidAsync("imageVault.viewerKeys.connect", _keyboardReference);
+        await JsRuntime.InvokeVoidAsync("archiveImageLabler.viewerKeys.connect", _keyboardReference);
         _keyboardConnected = true;
     }
 
@@ -671,13 +671,13 @@
             return;
         }
 
-        await JsRuntime.InvokeVoidAsync("imageVault.viewerKeys.disconnect");
+        await JsRuntime.InvokeVoidAsync("archiveImageLabler.viewerKeys.disconnect");
         _keyboardConnected = false;
     }
 
     private async Task ScrollActiveFilmstripItemAsync()
     {
-        await JsRuntime.InvokeVoidAsync("imageVault.scrollActiveFilmstripItem");
+        await JsRuntime.InvokeVoidAsync("archiveImageLabler.scrollActiveFilmstripItem");
     }
 
     public async ValueTask DisposeAsync()

@@ -1,7 +1,7 @@
-using FileZipPreview.Components;
-using FileZipPreview.Data;
-using FileZipPreview.Models;
-using FileZipPreview.Services;
+using ArchiveImageLabler.Components;
+using ArchiveImageLabler.Data;
+using ArchiveImageLabler.Models;
+using ArchiveImageLabler.Services;
 using Microsoft.AspNetCore.Components.Server.Circuits;
 using Microsoft.AspNetCore.DataProtection;
 using Microsoft.EntityFrameworkCore;
@@ -26,11 +26,11 @@ var libraryOptions = builder.Configuration.GetSection("Library").Get<LibraryOpti
 Directory.CreateDirectory(libraryOptions.DataPath);
 var keyPath = Path.Combine(libraryOptions.DataPath, "keys");
 Directory.CreateDirectory(keyPath);
-var dbPath = Path.Combine(libraryOptions.DataPath, "filezippreview.db");
+var dbPath = Path.Combine(libraryOptions.DataPath, "archiveimagelabler.db");
 
 builder.Services.AddDataProtection()
     .PersistKeysToFileSystem(new DirectoryInfo(keyPath))
-    .SetApplicationName("FileZipPreview");
+    .SetApplicationName("ArchiveImageLabler");
 
 builder.Services.AddDbContextFactory<LibraryDbContext>(options =>
     options.UseSqlite($"Data Source={dbPath}"));

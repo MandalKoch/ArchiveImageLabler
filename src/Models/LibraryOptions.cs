@@ -1,4 +1,4 @@
-namespace FileZipPreview.Models;
+namespace ArchiveImageLabler.Models;
 
 public sealed class LibraryOptions
 {

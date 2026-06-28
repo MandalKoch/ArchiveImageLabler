@@ -6,13 +6,13 @@
 @inject IJSRuntime JsRuntime
 @implements IAsyncDisposable
 
-<PageTitle>FileZipPreview</PageTitle>
+<PageTitle>ArchiveImageLabler</PageTitle>
 
 <div class="shell">
     <header class="app-header">
         <div>
             <p class="eyebrow">Mounted library</p>
-            <h1>FileZipPreview</h1>
+            <h1>ArchiveImageLabler</h1>
             <p class="path">@Options.Value.RootPath</p>
         </div>
 
@@ -211,17 +211,26 @@
                                 }
                             </div>
 
-                            <label class="field flush compact-field">
-                                <span>Rating</span>
-                                <select value="@RatingInputValue(_labelRating)" @onchange="HandleLabelRatingChanged">
-                                    <option value="">Unrated</option>
-                                    <option value="5">5 stars</option>
-                                    <option value="4">4 stars</option>
-                                    <option value="3">3 stars</option>
-                                    <option value="2">2 stars</option>
-                                    <option value="1">1 star</option>
-                                </select>
-                            </label>
+                            <div class="label-rating-row">
+                                <label class="field flush compact-field">
+                                    <span>Rating</span>
+                                    <select value="@RatingInputValue(_labelRating)" @onchange="HandleLabelRatingChanged">
+                                        <option value="">Unrated</option>
+                                        <option value="5">5 stars</option>
+                                        <option value="4">4 stars</option>
+                                        <option value="3">3 stars</option>
+                                        <option value="2">2 stars</option>
+                                        <option value="1">1 star</option>
+                                    </select>
+                                </label>
+                                <div class="quick-rating" aria-label="Rate @archive.DisplayName">
+                                    @foreach (var rating in RatingValues)
+                                    {
+                                        <button type="button" class="@QuickRatingButtonClass(_labelRating, rating)" title="@($"Rate {rating} stars")" @onclick="() => SaveLabelRatingAsync(rating)">&#9733;</button>
+                                    }
+                                    <button type="button" class="quick-rating-clear" title="Clear rating" @onclick="() => SaveLabelRatingAsync(null)">Clear</button>
+                                </div>
+                            </div>
 
                             <div class="drawer-actions flush">
                                 <button class="primary-button" @onclick="SaveLabelAffeAsync">Save</button>
@@ -1036,7 +1045,12 @@
 
     private async Task HandleLabelRatingChanged(ChangeEventArgs args)
     {
-        _labelRating = int.TryParse(args.Value?.ToString(), out var rating) ? rating : null;
+        await SaveLabelRatingAsync(int.TryParse(args.Value?.ToString(), out var rating) ? rating : null);
+    }
+
+    private async Task SaveLabelRatingAsync(int? rating)
+    {
+        _labelRating = rating is >= 1 and <= 5 ? rating : null;
         _labelAffeDirty = true;
         CancelLabelAffeAutosave();
         await SaveLabelAffeDraftAsync();
@@ -1284,7 +1298,12 @@
 
     private static string QuickRatingButtonClass(AssetCard asset, int rating)
     {
-        return asset.Rating >= rating ? "quick-rating-star active" : "quick-rating-star";
+        return QuickRatingButtonClass(asset.Rating, rating);
+    }
+
+    private static string QuickRatingButtonClass(int? currentRating, int rating)
+    {
+        return currentRating >= rating ? "quick-rating-star active" : "quick-rating-star";
     }
 
     private void CloseEditor()
@@ -1591,7 +1610,7 @@
         }
 
         _keyboardReference ??= DotNetObjectReference.Create(this);
-        await JsRuntime.InvokeVoidAsync("imageVault.viewerKeys.connect", _keyboardReference);
+        await JsRuntime.InvokeVoidAsync("archiveImageLabler.viewerKeys.connect", _keyboardReference);
         _keyboardConnected = true;
     }
 
@@ -1603,7 +1622,7 @@
         }
 
         _keyboardReference ??= DotNetObjectReference.Create(this);
-        await JsRuntime.InvokeVoidAsync("imageVault.labelAffeKeys.connect", _keyboardReference);
+        await JsRuntime.InvokeVoidAsync("archiveImageLabler.labelAffeKeys.connect", _keyboardReference);
         _labelKeyboardConnected = true;
     }
 
@@ -1614,7 +1633,7 @@
             return;
         }
 
-        await JsRuntime.InvokeVoidAsync("imageVault.viewerKeys.disconnect");
+        await JsRuntime.InvokeVoidAsync("archiveImageLabler.viewerKeys.disconnect");
         _keyboardConnected = false;
     }
 
@@ -1625,18 +1644,18 @@
             return;
         }
 
-        await JsRuntime.InvokeVoidAsync("imageVault.labelAffeKeys.disconnect");
+        await JsRuntime.InvokeVoidAsync("archiveImageLabler.labelAffeKeys.disconnect");
         _labelKeyboardConnected = false;
     }
 
     private async Task ScrollActiveFilmstripItemAsync()
     {
-        await JsRuntime.InvokeVoidAsync("imageVault.scrollActiveFilmstripItem");
+        await JsRuntime.InvokeVoidAsync("archiveImageLabler.scrollActiveFilmstripItem");
     }
 
     private async Task ScrollActiveLabelArchiveAsync()
     {
-        await JsRuntime.InvokeVoidAsync("imageVault.scrollActiveLabelArchive");
+        await JsRuntime.InvokeVoidAsync("archiveImageLabler.scrollActiveLabelArchive");
     }
 
     public async ValueTask DisposeAsync()

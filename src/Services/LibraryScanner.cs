@@ -1,15 +1,15 @@
 using System.Collections.Concurrent;
 using System.Security.Cryptography;
 using System.Threading.Channels;
-using FileZipPreview.Data;
-using FileZipPreview.Models;
+using ArchiveImageLabler.Data;
+using ArchiveImageLabler.Models;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 using SharpCompress.Archives;
 using SharpCompress.Common;
 using SharpCompress.Readers;
 
-namespace FileZipPreview.Services;
+namespace ArchiveImageLabler.Services;
 
 public sealed class LibraryScanner(
     IDbContextFactory<LibraryDbContext> dbFactory,
@@ -385,7 +385,7 @@ public sealed class LibraryScanner(
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 var directory = new DirectoryInfo(childDirectory);
-                if (string.Equals(directory.Name, ".imagevault", StringComparison.OrdinalIgnoreCase))
+                if (string.Equals(directory.Name, ".archiveimagelabler", StringComparison.OrdinalIgnoreCase))
                 {
                     continue;
                 }

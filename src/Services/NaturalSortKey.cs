@@ -1,6 +1,6 @@
 using System.Text;
 
-namespace FileZipPreview.Services;
+namespace ArchiveImageLabler.Services;
 
 internal static class NaturalSortKey
 {

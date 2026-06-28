@@ -1,6 +1,6 @@
 var builder = DistributedApplication.CreateBuilder(args);
 
-builder.AddProject<Projects.FileZipPreview>("filezippreview")
+builder.AddProject<Projects.ArchiveImageLabler>("archiveimagelabler")
     .WithEnvironment("Debug__StopApplicationOnLastBrowserClose", "true");
 
 builder.Build().Run();

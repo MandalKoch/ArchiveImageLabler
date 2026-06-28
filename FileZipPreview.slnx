@@ -1,5 +1,0 @@
-<Solution>
-  <Project Path="apphost/FileZipPreview.AppHost.csproj" />
-  <Project Path="servicedefaults/FileZipPreview.ServiceDefaults.csproj" />
-  <Project Path="src/FileZipPreview.csproj" />
-</Solution>

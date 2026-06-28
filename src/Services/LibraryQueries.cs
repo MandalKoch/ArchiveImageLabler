@@ -1,8 +1,8 @@
-using FileZipPreview.Data;
-using FileZipPreview.Models;
+using ArchiveImageLabler.Data;
+using ArchiveImageLabler.Models;
 using Microsoft.EntityFrameworkCore;
 
-namespace FileZipPreview.Services;
+namespace ArchiveImageLabler.Services;
 
 public sealed class LibraryQueries(IDbContextFactory<LibraryDbContext> dbFactory)
 {

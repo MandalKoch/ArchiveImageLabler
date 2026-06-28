@@ -1,6 +1,6 @@
-using FileZipPreview.Models;
+using ArchiveImageLabler.Models;
 
-namespace FileZipPreview.Services;
+namespace ArchiveImageLabler.Services;
 
 public static class ImageFormat
 {

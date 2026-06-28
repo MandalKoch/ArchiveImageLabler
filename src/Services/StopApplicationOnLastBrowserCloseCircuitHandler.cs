@@ -1,6 +1,6 @@
 using Microsoft.AspNetCore.Components.Server.Circuits;
 
-namespace FileZipPreview.Services;
+namespace ArchiveImageLabler.Services;
 
 public sealed class StopApplicationOnLastBrowserCloseCircuitHandler(
     IHostApplicationLifetime lifetime,
