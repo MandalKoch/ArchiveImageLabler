@@ -37,9 +37,10 @@ logs/
 .env.*
 !.env.example
 docker-compose.override.yml
-library/
+library/*
 !library/.gitkeep
 !library/.imagevault/
+library/.imagevault/*
 !library/.imagevault/.gitkeep
 
 # OS files
