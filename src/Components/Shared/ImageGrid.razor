@@ -17,7 +17,7 @@ else
                      @ondragover:preventDefault="true"
                      @ondrop="() => DropArchiveAsync(archive.Id)">
                 @SelectionControl(archive)
-                <button type="button" class="image-card-open" @onclick="args => OpenOrSelectArchiveAsync(archive, args)">
+                <button type="button" class="image-card-open" title="@archive.DisplayName" @onclick="args => OpenOrSelectArchiveAsync(archive, args)">
                     <span class="archive-card-preview">
                         <Preview AssetId="archive.PreviewImageId" AssetKind="archive.PreviewKind" />
                     </span>
@@ -42,7 +42,7 @@ else
         {
             <article @key="item.Id" class="@ImageCardClass(item)">
                 @SelectionControl(item)
-                <button type="button" class="image-card-open" @onclick="args => OpenOrSelectImageAsync(item, args)">
+                <button type="button" class="image-card-open" title="@item.DisplayName" @onclick="args => OpenOrSelectImageAsync(item, args)">
                     @MediaThumb(item)
                     <span class="@AssetTypeBadgeClass(item)">@AssetTypeLabel(item)</span>
                     <span class="image-name">@item.DisplayName</span>

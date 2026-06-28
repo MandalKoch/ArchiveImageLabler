@@ -12,7 +12,7 @@
     <header class="app-header">
         <div>
             <p class="eyebrow">Source page</p>
-            <h1>@(_source?.DisplayName ?? "Source")</h1>
+            <h1 title="@(_source?.DisplayName ?? "Source")">@(_source?.DisplayName ?? "Source")</h1>
             <p class="path">@(_source?.RelativePath ?? "Loading")</p>
         </div>
 
@@ -30,6 +30,10 @@
                     <button type="button" class="quick-rating-clear" title="Clear rating" @onclick="() => ClearAssetRatingAsync(_source)">Clear</button>
                 </div>
                 <button class="icon-button" title="Edit metadata" @onclick="() => EditAsset(_source)">Edit</button>
+                @if (_source.ParentId is long parentId)
+                {
+                    <a class="secondary-button" href="@SourcePageUrl(parentId)">Parent</a>
+                }
                 @if (_source.Kind == AssetKinds.Zip)
                 {
                     <button class="secondary-button" @onclick="ToggleIgnoredAsync">
@@ -563,6 +567,8 @@
     private int? SelectedRating => int.TryParse(_ratingFilter, out var rating) ? rating : null;
 
     private string ImageUrl(long id) => MediaUrl(id);
+
+    private static string SourcePageUrl(long id) => $"/source/{id}";
 
     private string MediaUrl(long id)
     {

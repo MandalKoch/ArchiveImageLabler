@@ -705,11 +705,21 @@ button:disabled {
     font-size: var(--source-font-size, 1rem);
 }
 
-.source-copy strong,
-.image-name {
+.source-copy strong {
     overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+    overflow-wrap: anywhere;
+    line-height: 1.18;
+}
+
+.image-name {
+    display: -webkit-box;
+    min-height: 2.36em;
+    overflow: hidden;
+    overflow-wrap: anywhere;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    line-height: 1.18;
+    white-space: normal;
 }
 
 .thumb {

@@ -282,7 +282,7 @@
                         <button class="source-toggle @(hasChildren ? null : "hidden")" title="@(IsSourceCollapsed(container.Id) ? "Expand" : "Collapse")" disabled="@(!hasChildren)" @onclick="() => ToggleSourceCollapsed(container.Id)">
                             @(IsSourceCollapsed(container.Id) ? ">" : "v")
                         </button>
-                        <button class="source-card @(container.Id == _snapshot.ActiveContainerId ? "active" : null) @(container.IsIgnored ? "ignored" : null)" @onclick="() => SelectContainerAsync(container.Id)">
+                        <button class="source-card @(container.Id == _snapshot.ActiveContainerId ? "active" : null) @(container.IsIgnored ? "ignored" : null)" title="@container.DisplayName" @onclick="() => SelectContainerAsync(container.Id)">
                             <Preview AssetId="container.PreviewImageId" AssetKind="container.PreviewKind" />
                             <span class="source-copy">
                                 <strong>@container.DisplayName</strong>
@@ -313,6 +313,10 @@
                                 <button type="button" class="quick-rating-clear" title="Clear rating" @onclick="() => ClearAssetRatingAsync(selectedContainer)">Clear</button>
                             </div>
                             <button class="icon-button" title="Edit metadata" @onclick="() => EditAsset(selectedContainer)">Edit</button>
+                            @if (selectedContainer.ParentId is long parentId)
+                            {
+                                <button class="secondary-button" @onclick="() => SelectContainerAsync(parentId)">Parent</button>
+                            }
                             @if (selectedContainer.Kind == AssetKinds.Zip)
                             {
                                 <button class="secondary-button" @onclick="() => OpenGroupDialog(selectedContainer)">Group</button>
@@ -335,6 +339,7 @@
                         <div class="bulk-rating-actions">
                             <button type="button" class="secondary-button" @onclick="SelectAllVisibleOverviewAssets">Select all</button>
                             <button type="button" class="secondary-button" @onclick="ClearOverviewSelection" disabled="@(!HasOverviewSelection)">Clear selection</button>
+                            <button type="button" class="secondary-button" @onclick="OpenSelectedGroupDialog" disabled="@(!HasSelectedOverviewArchives)">Group selected</button>
                             <div class="quick-rating" aria-label="Rate selected assets">
                                 @foreach (var rating in RatingValues)
                                 {
@@ -389,15 +394,15 @@
     </div>
 }
 
-@if (_groupingArchive is not null)
+@if (_groupingArchives.Count > 0)
 {
     <div class="confirm-overlay" role="dialog" aria-modal="true" aria-labelledby="group-dialog-title">
         <section class="confirm-dialog archive-group-dialog">
             <div class="panel-heading compact">
                 <div>
                     <p class="eyebrow">Archive group</p>
-                    <h2 id="group-dialog-title">@_groupingArchive.DisplayName</h2>
-                    <p class="path dark">@_groupingArchive.RelativePath</p>
+                    <h2 id="group-dialog-title">@GroupingDialogTitle</h2>
+                    <p class="path dark">@GroupingDialogSubtitle</p>
                 </div>
                 <button class="icon-button" title="Close" @onclick="CloseGroupDialog">x</button>
             </div>
@@ -409,7 +414,7 @@
 
             <div class="drawer-actions flush">
                 <button class="primary-button" @onclick="CreateArchiveGroupAsync">Create and add</button>
-                @if (IsArchiveInGroup(_groupingArchive))
+                @if (GroupingArchivesInGroups().Any())
                 {
                     <button class="secondary-button" @onclick="RemoveArchiveFromGroupAsync">Remove from group</button>
                 }
@@ -421,7 +426,7 @@
                     <strong>Existing groups</strong>
                     @foreach (var group in ArchiveGroups())
                     {
-                        <button class="group-option" disabled="@(_groupingArchive.ParentId == group.Id)" @onclick="() => MoveArchiveToGroupAsync(group)">
+                        <button class="group-option" disabled="@GroupingArchivesAllInGroup(group)" @onclick="() => MoveArchiveToGroupAsync(group)">
                             <span>@group.DisplayName</span>
                             <small>@GroupStatus(group)</small>
                         </button>
@@ -619,7 +624,7 @@
     private DateTimeOffset _lastArchivePreviewRefresh = DateTimeOffset.MinValue;
     private int _lastArchivePreviewImageCount;
     private AssetCard? _editingAsset;
-    private AssetCard? _groupingArchive;
+    private List<AssetCard> _groupingArchives = [];
     private AssetCard? _previewArchive;
     private List<AssetCard> _previewCandidates = [];
     private bool _isLoadingPreviewCandidates;
@@ -664,6 +669,8 @@
     private int SelectedOverviewCount => _selectedOverviewAssetIds.Count;
 
     private bool HasOverviewSelection => SelectedOverviewCount > 0;
+
+    private bool HasSelectedOverviewArchives => SelectedOverviewArchives().Any();
 
     protected override async Task OnInitializedAsync()
     {
@@ -941,7 +948,7 @@
         }
 
         _editingAsset = null;
-        _groupingArchive = null;
+        _groupingArchives = [];
         _previewArchive = null;
         _viewerAsset = null;
         _snapshot = null;
@@ -1128,6 +1135,18 @@
             : _snapshot.Archives.Concat(_snapshot.Images);
     }
 
+    private List<AssetCard> SelectedOverviewArchives()
+    {
+        if (_snapshot is null || _selectedOverviewAssetIds.Count == 0)
+        {
+            return [];
+        }
+
+        return _snapshot.Archives
+            .Where(asset => asset.Kind == AssetKinds.Zip && _selectedOverviewAssetIds.Contains(asset.Id))
+            .ToList();
+    }
+
     private void ToggleOverviewSelection(AssetSelectionChange change)
     {
         var visibleIds = OverviewAssets().Select(asset => asset.Id).ToList();
@@ -1250,52 +1269,85 @@
 
     private void OpenGroupDialog(AssetCard archive)
     {
-        _groupingArchive = archive;
+        _groupingArchives = [archive];
         _newGroupName = $"{CleanArchiveName(archive.DisplayName)} group".Trim();
+    }
+
+    private void OpenSelectedGroupDialog()
+    {
+        var archives = SelectedOverviewArchives();
+        if (archives.Count == 0)
+        {
+            return;
+        }
+
+        _groupingArchives = archives;
+        _newGroupName = archives.Count == 1
+            ? $"{CleanArchiveName(archives[0].DisplayName)} group".Trim()
+            : "Archive group";
     }
 
     private void CloseGroupDialog()
     {
-        _groupingArchive = null;
+        _groupingArchives = [];
         _newGroupName = string.Empty;
     }
 
     private async Task CreateArchiveGroupAsync()
     {
-        if (_groupingArchive is null)
+        if (_groupingArchives.Count == 0)
         {
             return;
         }
 
-        var groupId = await Library.CreateArchiveGroupAsync(_groupingArchive.Id, _newGroupName);
+        var groupId = await Library.CreateArchiveGroupAsync(GroupingArchiveIds(), _newGroupName);
         CloseGroupDialog();
+        ClearOverviewSelection();
         await LoadAsync(groupId);
     }
 
     private async Task MoveArchiveToGroupAsync(AssetCard group)
     {
-        if (_groupingArchive is null)
+        if (_groupingArchives.Count == 0)
         {
             return;
         }
 
-        await Library.MoveArchiveToGroupAsync(_groupingArchive.Id, group.Id);
+        await Library.MoveArchivesToGroupAsync(GroupingArchiveIds(), group.Id);
         CloseGroupDialog();
+        ClearOverviewSelection();
         await LoadAsync(group.Id);
     }
 
     private async Task RemoveArchiveFromGroupAsync()
     {
-        if (_groupingArchive is null)
+        var groupedArchiveIds = GroupingArchivesInGroups()
+            .Select(archive => archive.Id)
+            .ToArray();
+        if (groupedArchiveIds.Length == 0)
         {
             return;
         }
 
-        var archiveId = _groupingArchive.Id;
-        await Library.RemoveArchiveFromGroupAsync(archiveId);
+        var targetId = groupedArchiveIds[0];
+        await Library.RemoveArchivesFromGroupAsync(groupedArchiveIds);
         CloseGroupDialog();
-        await LoadAsync(archiveId);
+        ClearOverviewSelection();
+        await LoadAsync(targetId);
     }
+
+    private long[] GroupingArchiveIds()
+    {
+        return _groupingArchives.Select(archive => archive.Id).ToArray();
+    }
+
+    private string GroupingDialogTitle => _groupingArchives.Count == 1
+        ? _groupingArchives[0].DisplayName
+        : $"{_groupingArchives.Count} archives selected";
+
+    private string GroupingDialogSubtitle => _groupingArchives.Count == 1
+        ? _groupingArchives[0].RelativePath
+        : "Selected media files are ignored.";
 
     private IEnumerable<AssetCard> ArchiveGroups()
     {
@@ -1312,6 +1364,16 @@
         return _snapshot?.Containers.Any(container =>
             container.Id == archive.ParentId &&
             container.SourceType == AssetSourceTypes.ArchiveGroup) == true;
+    }
+
+    private IEnumerable<AssetCard> GroupingArchivesInGroups()
+    {
+        return _groupingArchives.Where(IsArchiveInGroup);
+    }
+
+    private bool GroupingArchivesAllInGroup(AssetCard group)
+    {
+        return _groupingArchives.Count > 0 && _groupingArchives.All(archive => archive.ParentId == group.Id);
     }
 
     private static string GroupStatus(AssetCard group)

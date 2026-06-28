@@ -14,5 +14,5 @@ public sealed class LibraryOptions
 
     public int DatabaseMutationBatchSize { get; set; } = 500;
 
-    public long MaxNestedZipBytesInMemory { get; set; } = 256L * 1024L * 1024L;
+    public long MaxNestedZipBytesInMemory { get; set; } = 1024L * 1024L * 1024L;
 }

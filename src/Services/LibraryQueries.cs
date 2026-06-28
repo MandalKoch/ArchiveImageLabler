@@ -463,18 +463,32 @@ public sealed class LibraryQueries(IDbContextFactory<LibraryDbContext> dbFactory
         await db.SaveChangesAsync(cancellationToken);
     }
 
-    public async Task<long> CreateArchiveGroupAsync(long archiveId, string groupName, CancellationToken cancellationToken = default)
+    public Task<long> CreateArchiveGroupAsync(long archiveId, string groupName, CancellationToken cancellationToken = default)
     {
+        return CreateArchiveGroupAsync([archiveId], groupName, cancellationToken);
+    }
+
+    public async Task<long> CreateArchiveGroupAsync(IReadOnlyCollection<long> archiveIds, string groupName, CancellationToken cancellationToken = default)
+    {
+        var distinctIds = archiveIds.Distinct().ToArray();
+        if (distinctIds.Length == 0)
+        {
+            throw new InvalidOperationException("Select at least one archive to group.");
+        }
+
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
-        var archive = await db.Assets.SingleAsync(asset => asset.Id == archiveId, cancellationToken);
-        if (archive.Kind != AssetKinds.Zip)
+        var archives = await db.Assets
+            .Where(asset => distinctIds.Contains(asset.Id))
+            .ToListAsync(cancellationToken);
+        if (archives.Count != distinctIds.Length || archives.Any(archive => archive.Kind != AssetKinds.Zip))
         {
             throw new InvalidOperationException("Only archives can be added to archive groups.");
         }
 
-        var parent = archive.ParentId is null
+        var firstArchive = archives.OrderBy(archive => Array.IndexOf(distinctIds, archive.Id)).First();
+        var parent = firstArchive.ParentId is null
             ? null
-            : await db.Assets.SingleOrDefaultAsync(asset => asset.Id == archive.ParentId.Value, cancellationToken);
+            : await db.Assets.SingleOrDefaultAsync(asset => asset.Id == firstArchive.ParentId.Value, cancellationToken);
         var name = string.IsNullOrWhiteSpace(groupName) ? "Archive group" : groupName.Trim();
         var relativePath = string.IsNullOrWhiteSpace(parent?.RelativePath)
             ? name
@@ -494,44 +508,93 @@ public sealed class LibraryQueries(IDbContextFactory<LibraryDbContext> dbFactory
 
         db.Assets.Add(group);
         await db.SaveChangesAsync(cancellationToken);
-        await MoveArchiveAsync(db, archive, group, cancellationToken);
+        foreach (var archive in archives.OrderBy(archive => Array.IndexOf(distinctIds, archive.Id)))
+        {
+            await MoveArchiveAsync(db, archive, group, cancellationToken);
+        }
+
         await db.SaveChangesAsync(cancellationToken);
         return group.Id;
     }
 
-    public async Task MoveArchiveToGroupAsync(long archiveId, long groupId, CancellationToken cancellationToken = default)
+    public Task MoveArchiveToGroupAsync(long archiveId, long groupId, CancellationToken cancellationToken = default)
     {
+        return MoveArchivesToGroupAsync([archiveId], groupId, cancellationToken);
+    }
+
+    public async Task MoveArchivesToGroupAsync(IReadOnlyCollection<long> archiveIds, long groupId, CancellationToken cancellationToken = default)
+    {
+        var distinctIds = archiveIds.Distinct().ToArray();
+        if (distinctIds.Length == 0)
+        {
+            return;
+        }
+
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
-        var archive = await db.Assets.SingleAsync(asset => asset.Id == archiveId, cancellationToken);
         var group = await db.Assets.SingleAsync(asset => asset.Id == groupId, cancellationToken);
-        if (archive.Kind != AssetKinds.Zip || group.SourceType != AssetSourceTypes.ArchiveGroup)
+        var archives = await db.Assets
+            .Where(asset => distinctIds.Contains(asset.Id))
+            .ToListAsync(cancellationToken);
+        if (archives.Count != distinctIds.Length || archives.Any(archive => archive.Kind != AssetKinds.Zip) || group.SourceType != AssetSourceTypes.ArchiveGroup)
         {
             throw new InvalidOperationException("Archive groups can only contain archives.");
         }
 
-        await MoveArchiveAsync(db, archive, group, cancellationToken);
+        foreach (var archive in archives.OrderBy(archive => Array.IndexOf(distinctIds, archive.Id)))
+        {
+            await MoveArchiveAsync(db, archive, group, cancellationToken);
+        }
+
         await db.SaveChangesAsync(cancellationToken);
     }
 
-    public async Task RemoveArchiveFromGroupAsync(long archiveId, CancellationToken cancellationToken = default)
+    public Task RemoveArchiveFromGroupAsync(long archiveId, CancellationToken cancellationToken = default)
     {
+        return RemoveArchivesFromGroupAsync([archiveId], cancellationToken);
+    }
+
+    public async Task RemoveArchivesFromGroupAsync(IReadOnlyCollection<long> archiveIds, CancellationToken cancellationToken = default)
+    {
+        var distinctIds = archiveIds.Distinct().ToArray();
+        if (distinctIds.Length == 0)
+        {
+            return;
+        }
+
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
-        var archive = await db.Assets.SingleAsync(asset => asset.Id == archiveId, cancellationToken);
-        if (archive.ParentId is null)
+        var archives = await db.Assets
+            .Where(asset => distinctIds.Contains(asset.Id) && asset.Kind == AssetKinds.Zip)
+            .ToListAsync(cancellationToken);
+        var groupIds = archives
+            .Where(archive => archive.ParentId is not null)
+            .Select(archive => archive.ParentId!.Value)
+            .Distinct()
+            .ToArray();
+        var groups = await db.Assets
+            .Where(asset => groupIds.Contains(asset.Id) && asset.SourceType == AssetSourceTypes.ArchiveGroup)
+            .ToDictionaryAsync(asset => asset.Id, cancellationToken);
+        var parentIds = groups.Values
+            .Where(group => group.ParentId is not null)
+            .Select(group => group.ParentId!.Value)
+            .Distinct()
+            .ToArray();
+        var parents = await db.Assets
+            .Where(asset => parentIds.Contains(asset.Id))
+            .ToDictionaryAsync(asset => asset.Id, cancellationToken);
+
+        foreach (var archive in archives.OrderBy(archive => Array.IndexOf(distinctIds, archive.Id)))
         {
-            return;
+            if (archive.ParentId is not long groupId || !groups.TryGetValue(groupId, out var group))
+            {
+                continue;
+            }
+
+            var parent = group.ParentId is long parentId && parents.TryGetValue(parentId, out var parentAsset)
+                ? parentAsset
+                : null;
+            await MoveArchiveAsync(db, archive, parent, cancellationToken);
         }
 
-        var group = await db.Assets.SingleOrDefaultAsync(asset => asset.Id == archive.ParentId.Value, cancellationToken);
-        if (group?.SourceType != AssetSourceTypes.ArchiveGroup)
-        {
-            return;
-        }
-
-        var parent = group.ParentId is null
-            ? null
-            : await db.Assets.SingleOrDefaultAsync(asset => asset.Id == group.ParentId.Value, cancellationToken);
-        await MoveArchiveAsync(db, archive, parent, cancellationToken);
         await db.SaveChangesAsync(cancellationToken);
     }
 
