@@ -61,6 +61,14 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      - name: Docker Scout
+        if: github.event_name != 'pull_request'
+        uses: docker/scout-action@v1
+        with:
+          command: cves,recommendations
+          image: ${{ env.DOCKERHUB_NAMESPACE }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }}
+          organization: ${{ env.DOCKERHUB_NAMESPACE }}
+
       - name: Update Docker Hub description
         if: github.event_name != 'pull_request'
         continue-on-error: true
