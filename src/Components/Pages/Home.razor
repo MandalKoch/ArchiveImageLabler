@@ -325,7 +325,37 @@
                     </div>
                 </div>
 
-                <ImageGrid Archives="_snapshot.Archives" Images="_snapshot.Images" OnOpen="OpenViewer" OnOpenArchive="OpenArchiveFromPreviewAsync" OnRate="RateOverviewAssetAsync" OnToggleArchiveIgnored="ToggleIgnoredAsync" OnChooseArchivePreview="OpenArchivePreviewPickerAsync" OnArchiveReorder="ReorderArchivesAsync" />
+                @if (OverviewAssets().Any())
+                {
+                    <div class="bulk-rating-bar">
+                        <div>
+                            <strong>@SelectedOverviewCount selected</strong>
+                            <span>@OverviewAssets().Count() visible</span>
+                        </div>
+                        <div class="bulk-rating-actions">
+                            <button type="button" class="secondary-button" @onclick="SelectAllVisibleOverviewAssets">Select all</button>
+                            <button type="button" class="secondary-button" @onclick="ClearOverviewSelection" disabled="@(!HasOverviewSelection)">Clear selection</button>
+                            <div class="quick-rating" aria-label="Rate selected assets">
+                                @foreach (var rating in RatingValues)
+                                {
+                                    <button type="button" class="quick-rating-star" title="@($"Rate selected {rating} stars")" disabled="@(!HasOverviewSelection)" @onclick="() => RateSelectedOverviewAssetsAsync(rating)">&#9733;</button>
+                                }
+                                <button type="button" class="quick-rating-clear" title="Clear selected ratings" disabled="@(!HasOverviewSelection)" @onclick="() => RateSelectedOverviewAssetsAsync(null)">Clear</button>
+                            </div>
+                        </div>
+                    </div>
+                }
+
+                <ImageGrid Archives="_snapshot.Archives"
+                           Images="_snapshot.Images"
+                           SelectedAssetIds="_selectedOverviewAssetIds"
+                           OnToggleSelection="ToggleOverviewSelection"
+                           OnOpen="OpenViewer"
+                           OnOpenArchive="OpenArchiveFromPreviewAsync"
+                           OnRate="RateOverviewAssetAsync"
+                           OnToggleArchiveIgnored="ToggleIgnoredAsync"
+                           OnChooseArchivePreview="OpenArchivePreviewPickerAsync"
+                           OnArchiveReorder="ReorderArchivesAsync" />
             </section>
             </section>
         }
@@ -606,6 +636,9 @@
     private CancellationTokenSource? _rootScanCancellation;
     private CancellationTokenSource? _archiveScanCancellation;
     private readonly HashSet<long> _collapsedSourceIds = [];
+    private readonly HashSet<long> _selectedOverviewAssetIds = [];
+    private long? _overviewSelectionAnchorId;
+    private bool _sourceTreeInitialized;
     private bool _showArchivesOnly;
     private bool _labelAffeMode;
     private long? _labelArchiveId;
@@ -627,6 +660,10 @@
     private string LabelAffeButtonClass => _labelAffeMode ? "secondary-button active-mode" : "secondary-button";
 
     private bool IsRootScanBusy => _isScanning || RootScanQueue.Snapshot.IsBusy || _pendingRootScan is not null || _isCountingScanArchives;
+
+    private int SelectedOverviewCount => _selectedOverviewAssetIds.Count;
+
+    private bool HasOverviewSelection => SelectedOverviewCount > 0;
 
     protected override async Task OnInitializedAsync()
     {
@@ -792,7 +829,8 @@
     private async Task LoadAsync(long? activeContainerId = null)
     {
         _snapshot = await Library.GetSnapshotAsync(activeContainerId ?? _snapshot?.ActiveContainerId, _search, SelectedRating, _unratedOnly);
-        PruneCollapsedSources();
+        PruneOverviewSelection();
+        InitializeOrPruneSourceTree();
         EnsureLabelArchiveSelected();
     }
 
@@ -904,8 +942,11 @@
 
         _editingAsset = null;
         _groupingArchive = null;
+        _previewArchive = null;
         _viewerAsset = null;
         _snapshot = null;
+        _selectedOverviewAssetIds.Clear();
+        _overviewSelectionAnchorId = null;
         _lastScan = null;
         _folderScanProgress = null;
         _archiveScanProgress = null;
@@ -1080,6 +1121,110 @@
         return _snapshot?.Images ?? [];
     }
 
+    private IEnumerable<AssetCard> OverviewAssets()
+    {
+        return _snapshot is null
+            ? []
+            : _snapshot.Archives.Concat(_snapshot.Images);
+    }
+
+    private void ToggleOverviewSelection(AssetSelectionChange change)
+    {
+        var visibleIds = OverviewAssets().Select(asset => asset.Id).ToList();
+        if (!visibleIds.Contains(change.AssetId))
+        {
+            return;
+        }
+
+        if (change.ShiftKey)
+        {
+            SelectOverviewRange(change.AssetId, visibleIds, additive: change.AdditiveKey);
+            return;
+        }
+
+        if (change.AdditiveKey && !change.Toggle)
+        {
+            _selectedOverviewAssetIds.Add(change.AssetId);
+            _overviewSelectionAnchorId = change.AssetId;
+            return;
+        }
+
+        if (!_selectedOverviewAssetIds.Add(change.AssetId))
+        {
+            _selectedOverviewAssetIds.Remove(change.AssetId);
+        }
+
+        _overviewSelectionAnchorId = change.AssetId;
+    }
+
+    private void SelectOverviewRange(long id, List<long> visibleIds, bool additive)
+    {
+        var anchorId = _overviewSelectionAnchorId is long currentAnchorId && visibleIds.Contains(currentAnchorId)
+            ? currentAnchorId
+            : _selectedOverviewAssetIds.LastOrDefault();
+        if (anchorId == 0 || !visibleIds.Contains(anchorId))
+        {
+            anchorId = id;
+        }
+
+        var startIndex = visibleIds.IndexOf(anchorId);
+        var endIndex = visibleIds.IndexOf(id);
+        if (startIndex < 0 || endIndex < 0)
+        {
+            return;
+        }
+
+        if (!additive)
+        {
+            _selectedOverviewAssetIds.Clear();
+        }
+
+        var first = Math.Min(startIndex, endIndex);
+        var last = Math.Max(startIndex, endIndex);
+        for (var index = first; index <= last; index++)
+        {
+            _selectedOverviewAssetIds.Add(visibleIds[index]);
+        }
+
+        _overviewSelectionAnchorId = id;
+    }
+
+    private void SelectAllVisibleOverviewAssets()
+    {
+        foreach (var asset in OverviewAssets())
+        {
+            _selectedOverviewAssetIds.Add(asset.Id);
+            _overviewSelectionAnchorId = asset.Id;
+        }
+    }
+
+    private void ClearOverviewSelection()
+    {
+        _selectedOverviewAssetIds.Clear();
+        _overviewSelectionAnchorId = null;
+    }
+
+    private void PruneOverviewSelection()
+    {
+        if (_snapshot is null)
+        {
+            _selectedOverviewAssetIds.Clear();
+            _overviewSelectionAnchorId = null;
+            return;
+        }
+
+        var visibleIds = OverviewAssets().Select(asset => asset.Id).ToHashSet();
+        _selectedOverviewAssetIds.RemoveWhere(id => !visibleIds.Contains(id));
+        if (_overviewSelectionAnchorId is long anchorId && !visibleIds.Contains(anchorId))
+        {
+            _overviewSelectionAnchorId = _selectedOverviewAssetIds.LastOrDefault();
+            if (_overviewSelectionAnchorId == 0)
+            {
+                _overviewSelectionAnchorId = null;
+            }
+        }
+    }
+
     private async Task ClearLoadedImagesAsync(long activeContainerId)
     {
         if (_viewerAsset is not null)
@@ -1088,6 +1233,8 @@
         }
 
         _editingAsset = null;
+        _selectedOverviewAssetIds.Clear();
+        _overviewSelectionAnchorId = null;
 
         if (_snapshot is not null)
         {
@@ -1631,40 +1778,57 @@
         await SaveAssetRatingAsync(change.Asset, change.Rating);
     }
 
-    private async Task SaveAssetRatingAsync(AssetCard asset, int? rating)
+    private async Task RateSelectedOverviewAssetsAsync(int? rating)
     {
-        await Library.SaveMetadataAsync(asset.Id, asset.LabelName, asset.Description, asset.Tags, rating);
-        UpdateAssetRating(asset.Id, rating);
+        if (!HasOverviewSelection)
+        {
+            return;
+        }
+
+        var updatedIds = await Library.SaveRatingsAsync(_selectedOverviewAssetIds, rating);
+        UpdateAssetRatings(updatedIds, rating);
     }
 
-    private void UpdateAssetRating(long id, int? rating)
+    private async Task SaveAssetRatingAsync(AssetCard asset, int? rating)
+    {
+        var updatedIds = await Library.SaveRatingsAsync([asset.Id], rating);
+        UpdateAssetRatings(updatedIds, rating);
+    }
+
+    private void UpdateAssetRatings(IEnumerable<long> ids, int? rating)
     {
         var normalizedRating = rating is >= 1 and <= 5 ? rating : null;
+        var idSet = ids.ToHashSet();
+        if (idSet.Count == 0)
+        {
+            return;
+        }
+
         if (_snapshot is not null)
         {
             _snapshot = _snapshot with
             {
-                Containers = _snapshot.Containers.Select(asset => UpdateAssetCardRating(asset, id, normalizedRating)).ToList(),
-                Archives = _snapshot.Archives.Select(asset => UpdateAssetCardRating(asset, id, normalizedRating)).ToList(),
-                Images = _snapshot.Images.Select(asset => UpdateAssetCardRating(asset, id, normalizedRating)).ToList()
+                Containers = _snapshot.Containers.Select(asset => UpdateAssetCardRating(asset, idSet, normalizedRating)).ToList(),
+                Archives = _snapshot.Archives.Select(asset => UpdateAssetCardRating(asset, idSet, normalizedRating)).ToList(),
+                Images = _snapshot.Images.Select(asset => UpdateAssetCardRating(asset, idSet, normalizedRating)).ToList()
             };
         }
 
-        if (_viewerAsset?.Id == id)
+        if (_viewerAsset is not null && idSet.Contains(_viewerAsset.Id))
         {
             _viewerAsset = _viewerAsset with { Rating = normalizedRating };
         }
 
-        if (_editingAsset?.Id == id)
+        if (_editingAsset is not null && idSet.Contains(_editingAsset.Id))
         {
             _editingAsset = _editingAsset with { Rating = normalizedRating };
             _editRating = normalizedRating;
         }
     }
 
-    private static AssetCard UpdateAssetCardRating(AssetCard asset, long id, int? rating)
+    private static AssetCard UpdateAssetCardRating(AssetCard asset, IReadOnlySet<long> ids, int? rating)
     {
-        return asset.Id == id ? asset with { Rating = rating } : asset;
+        return ids.Contains(asset.Id) ? asset with { Rating = rating } : asset;
     }
 
     private static string QuickRatingButtonClass(AssetCard asset, int rating)
@@ -2036,6 +2200,44 @@
 
         var availableIds = _snapshot.Containers.Select(container => container.Id).ToHashSet();
         _collapsedSourceIds.RemoveWhere(id => !availableIds.Contains(id));
+    }
+
+    private void InitializeOrPruneSourceTree()
+    {
+        if (_snapshot is null)
+        {
+            _collapsedSourceIds.Clear();
+            return;
+        }
+
+        if (!_sourceTreeInitialized && _snapshot.Containers.Count > 0)
+        {
+            CollapseAllSources();
+            _sourceTreeInitialized = true;
+            return;
+        }
+
+        PruneCollapsedSources();
+    }
+
+    private void CollapseAllSources()
+    {
+        _collapsedSourceIds.Clear();
+
+        if (_snapshot is null)
+        {
+            return;
+        }
+
+        var parentIds = _snapshot.Containers
+            .Where(container => container.ParentId is not null)
+            .Select(container => container.ParentId!.Value)
+            .ToHashSet();
+
+        foreach (var container in _snapshot.Containers.Where(container => parentIds.Contains(container.Id)))
+        {
+            _collapsedSourceIds.Add(container.Id);
+        }
     }
 
     private void ExpandSourceAncestors(AssetCard asset)

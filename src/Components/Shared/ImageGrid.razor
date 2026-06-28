@@ -11,33 +11,38 @@ else
         {
             <article @key="archive.Id"
                      class="@ArchiveCardClass(archive)"
-                     draggable="true"
+                     draggable="@IsDraggableArchive(archive)"
                      @ondragstart="() => StartArchiveDrag(archive.Id)"
                      @ondragend="ClearArchiveDrag"
                      @ondragover:preventDefault="true"
                      @ondrop="() => DropArchiveAsync(archive.Id)">
-                <button type="button" class="image-card-open" @onclick="() => OnOpenArchive.InvokeAsync(archive)">
+                @SelectionControl(archive)
+                <button type="button" class="image-card-open" @onclick="args => OpenOrSelectArchiveAsync(archive, args)">
                     <span class="archive-card-preview">
                         <Preview AssetId="archive.PreviewImageId" AssetKind="archive.PreviewKind" />
                     </span>
-                    <span class="asset-type-badge archive">Archive</span>
+                    <span class="asset-type-badge archive">@ArchiveTypeLabel(archive)</span>
                     <span class="image-name">@archive.DisplayName</span>
                     <span class="stars">@ArchiveStatus(archive)</span>
                 </button>
                 @RatingControls(archive)
                 <div class="archive-card-actions">
                     <button type="button" class="quick-rating-clear" @onclick="() => OnChooseArchivePreview.InvokeAsync(archive)">Preview</button>
-                    <button type="button" class="quick-rating-clear" @onclick="() => OnToggleArchiveIgnored.InvokeAsync(archive)">
-                        @(archive.IsIgnored ? "Unignore" : "Ignore")
-                    </button>
+                    @if (archive.Kind == AssetKinds.Zip)
+                    {
+                        <button type="button" class="quick-rating-clear" @onclick="() => OnToggleArchiveIgnored.InvokeAsync(archive)">
+                            @(archive.IsIgnored ? "Unignore" : "Ignore")
+                        </button>
+                    }
                 </div>
             </article>
         }
 
         @foreach (var item in Images)
         {
-            <article @key="item.Id" class="image-card">
-                <button type="button" class="image-card-open" @onclick="() => OnOpen.InvokeAsync(item)">
+            <article @key="item.Id" class="@ImageCardClass(item)">
+                @SelectionControl(item)
+                <button type="button" class="image-card-open" @onclick="args => OpenOrSelectImageAsync(item, args)">
                     @MediaThumb(item)
                     <span class="@AssetTypeBadgeClass(item)">@AssetTypeLabel(item)</span>
                     <span class="image-name">@item.DisplayName</span>
@@ -66,6 +71,10 @@ else
 
     [Parameter] public EventCallback<IReadOnlyList<long>> OnArchiveReorder { get; set; }
 
+    [Parameter] public IReadOnlySet<long> SelectedAssetIds { get; set; } = new HashSet<long>();
+
+    [Parameter] public EventCallback<AssetSelectionChange> OnToggleSelection { get; set; }
+
     [Parameter] public Func<long, string>? MediaUrlForAsset { get; set; }
 
     private long? _draggingArchiveId;
@@ -76,14 +85,43 @@ else
 
     private static string StatusBadge(AssetCard asset) => asset.IsIgnored ? "Ignored" : Stars(asset.Rating);
 
-    private static string ArchiveStatus(AssetCard archive) => archive.IsIgnored ? "Ignored" : $"{archive.ImageCount} media files";
+    private static string ArchiveStatus(AssetCard archive)
+    {
+        if (archive.IsIgnored)
+        {
+            return "Ignored";
+        }
+
+        if (archive.SourceType == AssetSourceTypes.ArchiveGroup)
+        {
+            var archiveText = archive.ChildCount == 1 ? "1 archive" : $"{archive.ChildCount} archives";
+            return $"{archiveText}, {archive.ImageCount} media files";
+        }
+
+        return $"{archive.ImageCount} media files";
+    }
+
+    private static string ArchiveTypeLabel(AssetCard archive)
+    {
+        return archive.SourceType == AssetSourceTypes.ArchiveGroup ? "Group" : "Archive";
+    }
 
     private string ArchiveCardClass(AssetCard archive)
     {
         var classes = new List<string> { "image-card", "archive-card" };
+        if (archive.SourceType == AssetSourceTypes.ArchiveGroup)
+        {
+            classes.Add("archive-group-card");
+        }
+
         if (archive.IsIgnored)
         {
             classes.Add("ignored");
+        }
+
+        if (SelectedAssetIds.Contains(archive.Id))
+        {
+            classes.Add("selected");
         }
 
         if (_draggingArchiveId == archive.Id)
@@ -94,9 +132,28 @@ else
         return string.Join(" ", classes);
     }
 
+    private string ImageCardClass(AssetCard asset)
+    {
+        var classes = new List<string> { "image-card" };
+        if (SelectedAssetIds.Contains(asset.Id))
+        {
+            classes.Add("selected");
+        }
+
+        return string.Join(" ", classes);
+    }
+
+    private static bool IsDraggableArchive(AssetCard archive)
+    {
+        return archive.Kind == AssetKinds.Zip;
+    }
+
     private void StartArchiveDrag(long archiveId)
     {
-        _draggingArchiveId = archiveId;
+        if (Archives.FirstOrDefault(archive => archive.Id == archiveId) is { Kind: AssetKinds.Zip })
+        {
+            _draggingArchiveId = archiveId;
+        }
     }
 
     private void ClearArchiveDrag()
@@ -106,13 +163,19 @@ else
 
     private async Task DropArchiveAsync(long targetArchiveId)
     {
-        if (_draggingArchiveId is not { } sourceArchiveId || sourceArchiveId == targetArchiveId)
+        var targetArchive = Archives.FirstOrDefault(archive => archive.Id == targetArchiveId);
+        if (targetArchive?.Kind != AssetKinds.Zip ||
+            _draggingArchiveId is not { } sourceArchiveId ||
+            sourceArchiveId == targetArchiveId)
         {
             ClearArchiveDrag();
             return;
         }
 
-        var orderedIds = Archives.Select(archive => archive.Id).ToList();
+        var orderedIds = Archives
+            .Where(archive => archive.Kind == AssetKinds.Zip)
+            .Select(archive => archive.Id)
+            .ToList();
         var sourceIndex = orderedIds.IndexOf(sourceArchiveId);
         var targetIndex = orderedIds.IndexOf(targetArchiveId);
         if (sourceIndex < 0 || targetIndex < 0)
@@ -131,6 +194,44 @@ else
         ClearArchiveDrag();
         await OnArchiveReorder.InvokeAsync(orderedIds);
     }
+
+    private async Task OpenOrSelectArchiveAsync(AssetCard archive, MouseEventArgs args)
+    {
+        if (args.CtrlKey || args.MetaKey || args.ShiftKey)
+        {
+            await OnToggleSelection.InvokeAsync(new AssetSelectionChange(archive.Id, args.ShiftKey, args.CtrlKey || args.MetaKey, Toggle: false));
+            return;
+        }
+
+        await OnOpenArchive.InvokeAsync(archive);
+    }
+
+    private async Task OpenOrSelectImageAsync(AssetCard asset, MouseEventArgs args)
+    {
+        if (args.CtrlKey || args.MetaKey || args.ShiftKey)
+        {
+            await OnToggleSelection.InvokeAsync(new AssetSelectionChange(asset.Id, args.ShiftKey, args.CtrlKey || args.MetaKey, Toggle: false));
+            return;
+        }
+
+        await OnOpen.InvokeAsync(asset);
+    }
+
+    private RenderFragment SelectionControl(AssetCard asset) => builder =>
+    {
+        var isSelected = SelectedAssetIds.Contains(asset.Id);
+        builder.OpenElement(0, "label");
+        builder.AddAttribute(1, "class", "image-select");
+        builder.AddAttribute(2, "title", isSelected ? "Remove from selection" : "Add to selection");
+        builder.OpenElement(3, "input");
+        builder.AddAttribute(4, "type", "checkbox");
+        builder.AddAttribute(5, "checked", isSelected);
+        builder.AddAttribute(6, "onchange", EventCallback.Factory.Create(this, () => OnToggleSelection.InvokeAsync(new AssetSelectionChange(asset.Id, ShiftKey: false, AdditiveKey: true, Toggle: true))));
+        builder.CloseElement();
+        builder.OpenElement(7, "span");
+        builder.CloseElement();
+        builder.CloseElement();
+    };
 
     private static string AssetTypeLabel(AssetCard asset)
     {

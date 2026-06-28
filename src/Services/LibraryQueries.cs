@@ -109,7 +109,12 @@ public sealed class LibraryQueries(IDbContextFactory<LibraryDbContext> dbFactory
             })
             .ToList();
 
-        var activeContainerId = selectedContainerId ?? containers.FirstOrDefault(container => container.ImageCount > 0)?.Id;
+        var activeContainerId = selectedContainerId ??
+            containers.FirstOrDefault(container =>
+                container.ParentId is null &&
+                container.Kind == AssetKinds.Folder &&
+                container.SourceType == AssetSourceTypes.FileSystemFolder)?.Id ??
+            containers.FirstOrDefault(container => container.ImageCount > 0)?.Id;
 
         var imageQuery = db.Assets
             .AsNoTracking()
@@ -314,12 +319,80 @@ public sealed class LibraryQueries(IDbContextFactory<LibraryDbContext> dbFactory
     {
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
         var asset = await db.Assets.SingleAsync(asset => asset.Id == id, cancellationToken);
+        var normalizedRating = rating is >= 1 and <= 5 ? rating : null;
         asset.LabelName = labelName.Trim();
         asset.Description = description.Trim();
         asset.Tags = NormalizeTags(tags);
-        asset.Rating = rating is >= 1 and <= 5 ? rating : null;
+        asset.Rating = normalizedRating;
         asset.UpdatedAt = DateTimeOffset.UtcNow;
+
+        if (normalizedRating is not null && asset.Kind is AssetKinds.Folder or AssetKinds.Zip)
+        {
+            var targetIds = await RatingTargetIdsAsync(db, [id], includeUnratedDescendants: true, cancellationToken);
+            await db.Assets
+                .Where(descendant => targetIds.Contains(descendant.Id) && descendant.Id != id)
+                .ExecuteUpdateAsync(setters => setters
+                    .SetProperty(descendant => descendant.Rating, normalizedRating)
+                    .SetProperty(descendant => descendant.UpdatedAt, DateTimeOffset.UtcNow), cancellationToken);
+        }
+
         await db.SaveChangesAsync(cancellationToken);
+    }
+
+    public async Task<IReadOnlyList<long>> SaveRatingsAsync(IReadOnlyCollection<long> ids, int? rating, CancellationToken cancellationToken = default)
+    {
+        var distinctIds = ids.Distinct().ToArray();
+        if (distinctIds.Length == 0)
+        {
+            return [];
+        }
+
+        var normalizedRating = rating is >= 1 and <= 5 ? rating : null;
+        await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
+        var targetIds = await RatingTargetIdsAsync(db, distinctIds, normalizedRating is not null, cancellationToken);
+        await db.Assets
+            .Where(asset => targetIds.Contains(asset.Id))
+            .ExecuteUpdateAsync(setters => setters
+                .SetProperty(asset => asset.Rating, normalizedRating)
+                .SetProperty(asset => asset.UpdatedAt, DateTimeOffset.UtcNow), cancellationToken);
+
+        return targetIds;
+    }
+
+    private static async Task<long[]> RatingTargetIdsAsync(
+        LibraryDbContext db,
+        IReadOnlyCollection<long> rootIds,
+        bool includeUnratedDescendants,
+        CancellationToken cancellationToken)
+    {
+        if (!includeUnratedDescendants)
+        {
+            return rootIds.ToArray();
+        }
+
+        var rows = await db.Assets
+            .AsNoTracking()
+            .Where(asset => asset.IsAvailable)
+            .Select(asset => new RatingTargetRow(asset.Id, asset.ParentId, asset.Kind, asset.Rating))
+            .ToListAsync(cancellationToken);
+        var roots = rows.Where(asset => rootIds.Contains(asset.Id)).ToList();
+        var childrenByParent = rows
+            .Where(asset => asset.ParentId is not null)
+            .ToLookup(asset => asset.ParentId!.Value);
+        var targetIds = rootIds.ToHashSet();
+
+        foreach (var root in roots.Where(asset => asset.Kind is AssetKinds.Folder or AssetKinds.Zip))
+        {
+            foreach (var descendant in DescendantsOf(root.Id, childrenByParent))
+            {
+                if (descendant.Rating is null && descendant.Kind is AssetKinds.Folder or AssetKinds.Zip or AssetKinds.Image or AssetKinds.Audio or AssetKinds.Video)
+                {
+                    targetIds.Add(descendant.Id);
+                }
+            }
+        }
+
+        return targetIds.ToArray();
     }
 
     public async Task SetIgnoredAsync(long id, bool isIgnored, CancellationToken cancellationToken = default)
@@ -615,12 +688,23 @@ public sealed class LibraryQueries(IDbContextFactory<LibraryDbContext> dbFactory
         bool unratedOnly)
     {
         var parentIds = ParentIdsForContainer(container, childrenByParent).ToHashSet();
+        var archiveGroupIds = containers
+            .Where(asset =>
+                asset.SourceType == AssetSourceTypes.ArchiveGroup &&
+                asset.ParentId is not null &&
+                parentIds.Contains(asset.ParentId.Value))
+            .Select(asset => asset.Id)
+            .ToHashSet();
+
         return containers
             .Where(asset =>
-                asset.Kind == AssetKinds.Zip &&
+                asset.Kind is AssetKinds.Zip ||
+                asset.SourceType == AssetSourceTypes.ArchiveGroup)
+            .Where(asset =>
                 asset.Id != container.Id &&
                 asset.ParentId is not null &&
                 parentIds.Contains(asset.ParentId.Value))
+            .Where(asset => asset.SourceType == AssetSourceTypes.ArchiveGroup || !archiveGroupIds.Contains(asset.ParentId!.Value))
             .Where(asset => MatchesFilters(asset, search, rating, unratedOnly))
             .OrderBy(asset => asset.DisplayOrder ?? int.MaxValue)
             .ThenBy(asset => NaturalSortKey.Build(asset.RelativePath))
@@ -772,6 +856,20 @@ public sealed class LibraryQueries(IDbContextFactory<LibraryDbContext> dbFactory
         string? ScanError);
 
     private sealed record MediaRow(long Id, long ParentId, string Kind, string SourceType);
+
+    private sealed record RatingTargetRow(long Id, long? ParentId, string Kind, int? Rating);
+
+    private static IEnumerable<RatingTargetRow> DescendantsOf(long id, ILookup<long, RatingTargetRow> childrenByParent)
+    {
+        foreach (var child in childrenByParent[id])
+        {
+            yield return child;
+            foreach (var descendant in DescendantsOf(child.Id, childrenByParent))
+            {
+                yield return descendant;
+            }
+        }
+    }
 }
 
 public sealed record LibrarySnapshot(

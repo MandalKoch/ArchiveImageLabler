@@ -609,6 +609,34 @@ button:disabled {
     overflow-wrap: anywhere;
 }
 
+.bulk-rating-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 12px 18px;
+    border-bottom: 1px solid var(--line);
+    background: #fbfaf7;
+}
+
+.bulk-rating-bar > div:first-child {
+    display: grid;
+    gap: 2px;
+}
+
+.bulk-rating-bar span {
+    color: var(--muted);
+    font-size: 0.78rem;
+    font-weight: 700;
+}
+
+.bulk-rating-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
 .source-tree-row {
     display: grid;
     grid-template-columns: calc(22px + (var(--source-level, 0) * 16px)) minmax(0, 1fr);
@@ -757,6 +785,12 @@ button:disabled {
     text-align: left;
 }
 
+.image-card.selected {
+    border-color: var(--accent);
+    background: #eef6f4;
+    box-shadow: 0 0 0 2px rgba(45, 127, 120, 0.14);
+}
+
 .image-card-open {
     display: grid;
     grid-template-rows: 220px auto auto;
@@ -780,6 +814,11 @@ button:disabled {
 .archive-card {
     border-style: dashed;
     cursor: grab;
+}
+
+.archive-group-card {
+    border-style: solid;
+    cursor: default;
 }
 
 .archive-card.dragging {
@@ -851,6 +890,49 @@ button:disabled {
 
 .asset-type-badge.image {
     background: rgba(29, 95, 89, 0.92);
+}
+
+.image-select {
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    z-index: 2;
+    display: inline-grid;
+    place-items: center;
+    width: 30px;
+    height: 30px;
+    border: 1px solid rgba(255, 255, 255, 0.72);
+    border-radius: 6px;
+    background: rgba(24, 25, 27, 0.72);
+}
+
+.image-select input {
+    position: absolute;
+    opacity: 0;
+    pointer-events: none;
+}
+
+.image-select span {
+    display: grid;
+    place-items: center;
+    width: 16px;
+    height: 16px;
+    border: 2px solid white;
+    border-radius: 4px;
+}
+
+.image-select input:checked + span {
+    border-color: var(--accent);
+    background: var(--accent);
+}
+
+.image-select input:checked + span::after {
+    content: "";
+    width: 8px;
+    height: 4px;
+    border-left: 2px solid white;
+    border-bottom: 2px solid white;
+    transform: rotate(-45deg) translate(1px, -1px);
 }
 
 .overview-rating {
