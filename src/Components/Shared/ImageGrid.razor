@@ -9,22 +9,30 @@ else
     <div class="image-grid">
         @foreach (var archive in Archives)
         {
-            <button @key="archive.Id" class="image-card archive-card" @onclick="() => OnOpenArchive.InvokeAsync(archive)">
-                <span class="archive-card-preview">
-                    <Preview AssetId="archive.PreviewImageId" AssetKind="archive.PreviewKind" />
-                </span>
-                <span class="image-name">@archive.DisplayName</span>
-                <span class="stars">@ArchiveStatus(archive)</span>
-            </button>
+            <article @key="archive.Id" class="image-card archive-card">
+                <button type="button" class="image-card-open" @onclick="() => OnOpenArchive.InvokeAsync(archive)">
+                    <span class="archive-card-preview">
+                        <Preview AssetId="archive.PreviewImageId" AssetKind="archive.PreviewKind" />
+                    </span>
+                    <span class="asset-type-badge archive">Archive</span>
+                    <span class="image-name">@archive.DisplayName</span>
+                    <span class="stars">@ArchiveStatus(archive)</span>
+                </button>
+                @RatingControls(archive)
+            </article>
         }
 
         @foreach (var item in Images)
         {
-            <button @key="item.Id" class="image-card" @onclick="() => OnOpen.InvokeAsync(item)">
-                @MediaThumb(item)
-                <span class="image-name">@item.DisplayName</span>
-                <span class="stars">@StatusBadge(item)</span>
-            </button>
+            <article @key="item.Id" class="image-card">
+                <button type="button" class="image-card-open" @onclick="() => OnOpen.InvokeAsync(item)">
+                    @MediaThumb(item)
+                    <span class="@AssetTypeBadgeClass(item)">@AssetTypeLabel(item)</span>
+                    <span class="image-name">@item.DisplayName</span>
+                    <span class="stars">@StatusBadge(item)</span>
+                </button>
+                @RatingControls(item)
+            </article>
         }
     </div>
 }
@@ -38,6 +46,8 @@ else
 
     [Parameter] public EventCallback<AssetCard> OnOpenArchive { get; set; }
 
+    [Parameter] public EventCallback<AssetRatingChange> OnRate { get; set; }
+
     private static string MediaUrl(long id) => $"/api/assets/{id}/content";
 
     private static string Stars(int? rating) => rating is null ? "Unrated" : new string('*', rating.Value);
@@ -45,6 +55,59 @@ else
     private static string StatusBadge(AssetCard asset) => asset.IsIgnored ? "Ignored" : Stars(asset.Rating);
 
     private static string ArchiveStatus(AssetCard archive) => archive.IsIgnored ? "Ignored" : $"{archive.ImageCount} media files";
+
+    private static string AssetTypeLabel(AssetCard asset)
+    {
+        return asset.Kind switch
+        {
+            AssetKinds.Audio => "Audio",
+            AssetKinds.Video => "Video",
+            _ => "Image"
+        };
+    }
+
+    private static string AssetTypeBadgeClass(AssetCard asset)
+    {
+        return asset.Kind switch
+        {
+            AssetKinds.Audio => "asset-type-badge audio",
+            AssetKinds.Video => "asset-type-badge video",
+            _ => "asset-type-badge image"
+        };
+    }
+
+    private static string RatingButtonClass(AssetCard asset, int rating)
+    {
+        return asset.Rating >= rating ? "quick-rating-star active" : "quick-rating-star";
+    }
+
+    private RenderFragment RatingControls(AssetCard asset) => builder =>
+    {
+        builder.OpenElement(0, "div");
+        builder.AddAttribute(1, "class", "overview-rating");
+        builder.AddAttribute(2, "aria-label", $"Rate {asset.DisplayName}");
+
+        for (var rating = 1; rating <= 5; rating++)
+        {
+            var currentRating = rating;
+            builder.OpenElement(3 + rating, "button");
+            builder.AddAttribute(8 + rating, "type", "button");
+            builder.AddAttribute(13 + rating, "class", RatingButtonClass(asset, currentRating));
+            builder.AddAttribute(18 + rating, "title", $"Rate {currentRating} stars");
+            builder.AddAttribute(23 + rating, "onclick", EventCallback.Factory.Create(this, () => OnRate.InvokeAsync(new AssetRatingChange(asset, currentRating))));
+            builder.AddMarkupContent(28 + rating, "&#9733;");
+            builder.CloseElement();
+        }
+
+        builder.OpenElement(34, "button");
+        builder.AddAttribute(35, "type", "button");
+        builder.AddAttribute(36, "class", "quick-rating-clear");
+        builder.AddAttribute(37, "title", "Clear rating");
+        builder.AddAttribute(38, "onclick", EventCallback.Factory.Create(this, () => OnRate.InvokeAsync(new AssetRatingChange(asset, null))));
+        builder.AddContent(39, "Clear");
+        builder.CloseElement();
+        builder.CloseElement();
+    };
 
     private static RenderFragment MediaThumb(AssetCard asset) => builder =>
     {

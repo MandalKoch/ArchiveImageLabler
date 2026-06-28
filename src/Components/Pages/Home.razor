@@ -317,7 +317,7 @@
                     </div>
                 </div>
 
-                <ImageGrid Archives="_snapshot.Archives" Images="_snapshot.Images" OnOpen="OpenViewer" OnOpenArchive="OpenArchiveFromPreviewAsync" />
+                <ImageGrid Archives="_snapshot.Archives" Images="_snapshot.Images" OnOpen="OpenViewer" OnOpenArchive="OpenArchiveFromPreviewAsync" OnRate="RateOverviewAssetAsync" />
             </section>
             </section>
         }
@@ -1470,6 +1470,11 @@
     private async Task ClearAssetRatingAsync(AssetCard asset)
     {
         await SaveAssetRatingAsync(asset, null);
+    }
+
+    private async Task RateOverviewAssetAsync(AssetRatingChange change)
+    {
+        await SaveAssetRatingAsync(change.Asset, change.Rating);
     }
 
     private async Task SaveAssetRatingAsync(AssetCard asset, int? rating)

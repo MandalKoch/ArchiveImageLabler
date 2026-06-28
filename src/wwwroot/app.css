@@ -741,13 +741,31 @@ button:disabled {
 
 .image-card {
     display: grid;
-    grid-template-rows: 220px auto auto;
+    grid-template-rows: minmax(0, 1fr) auto;
     gap: 8px;
+    position: relative;
     min-width: 0;
+    min-height: 316px;
     border: 1px solid var(--line);
     border-radius: 8px;
     padding: 8px;
     background: #fbfaf7;
+    text-align: left;
+}
+
+.image-card-open {
+    display: grid;
+    grid-template-rows: 220px auto auto;
+    gap: 8px;
+    position: relative;
+    width: 100%;
+    min-height: 0;
+    min-width: 0;
+    overflow: hidden;
+    border: 0;
+    padding: 0;
+    background: transparent;
+    color: inherit;
     text-align: left;
 }
 
@@ -761,8 +779,20 @@ button:disabled {
 
 .archive-card-preview {
     display: grid;
+    width: 100%;
+    height: 220px;
     min-width: 0;
     min-height: 0;
+    overflow: hidden;
+}
+
+.image-card-open > img,
+.image-card-open > video,
+.image-card-open > .media-placeholder {
+    width: 100%;
+    height: 220px;
+    min-height: 0;
+    overflow: hidden;
 }
 
 .archive-card-preview .thumb {
@@ -774,6 +804,46 @@ button:disabled {
 .image-card video {
     border-radius: 6px;
     background: #e8e2d7;
+}
+
+.asset-type-badge {
+    position: absolute;
+    top: 8px;
+    left: 8px;
+    display: inline-flex;
+    align-items: center;
+    min-height: 24px;
+    border-radius: 6px;
+    padding: 0 8px;
+    background: rgba(24, 25, 27, 0.82);
+    color: white;
+    font-size: 0.72rem;
+    font-weight: 800;
+}
+
+.asset-type-badge.archive {
+    background: rgba(182, 106, 44, 0.92);
+}
+
+.asset-type-badge.audio {
+    background: rgba(45, 127, 120, 0.92);
+}
+
+.asset-type-badge.video {
+    background: rgba(35, 39, 45, 0.92);
+}
+
+.asset-type-badge.image {
+    background: rgba(29, 95, 89, 0.92);
+}
+
+.overview-rating {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    min-height: 34px;
+    border-top: 1px solid var(--line);
+    padding-top: 8px;
 }
 
 .image-card video,
@@ -1155,6 +1225,17 @@ button:disabled {
     }
 
     .image-card {
+        min-height: 256px;
+    }
+
+    .image-card-open {
         grid-template-rows: 160px auto auto;
+    }
+
+    .archive-card-preview,
+    .image-card-open > img,
+    .image-card-open > video,
+    .image-card-open > .media-placeholder {
+        height: 160px;
     }
 }
