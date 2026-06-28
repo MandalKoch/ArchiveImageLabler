@@ -1,0 +1,5 @@
+<Solution>
+  <Project Path="apphost/ArchiveImageLabler.AppHost.csproj" />
+  <Project Path="servicedefaults/ArchiveImageLabler.ServiceDefaults.csproj" />
+  <Project Path="src/ArchiveImageLabler.csproj" />
+</Solution>

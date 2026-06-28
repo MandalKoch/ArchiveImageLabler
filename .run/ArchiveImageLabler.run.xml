@@ -1,0 +1,12 @@
+<component name="ProjectRunConfigurationManager">
+  <configuration default="false" name="ArchiveImageLabler: local http" type="LaunchSettings" factoryName=".NET Launch Settings Profile">
+    <option name="LAUNCH_PROFILE_PROJECT_FILE_PATH" value="$PROJECT_DIR$/src/ArchiveImageLabler.csproj" />
+    <option name="LAUNCH_PROFILE_TFM" value="net10.0" />
+    <option name="LAUNCH_PROFILE_NAME" value="http" />
+    <option name="BROWSER_STOP_ON_CLOSE" value="1" />
+    <option name="USE_EXTERNAL_CONSOLE" value="0" />
+    <method v="2">
+      <option name="Build" />
+    </method>
+  </configuration>
+</component>
