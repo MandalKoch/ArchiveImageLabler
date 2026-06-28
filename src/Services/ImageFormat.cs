@@ -36,6 +36,32 @@ public static class ImageFormat
         ".mkv"
     };
 
+    private static readonly HashSet<string> ArchiveExtensions = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ".zip",
+        ".cbz",
+        ".rar",
+        ".cbr",
+        ".7z",
+        ".cb7",
+        ".tar",
+        ".cbt",
+        ".tar.gz",
+        ".tgz",
+        ".tar.bz2",
+        ".tbz",
+        ".tbz2",
+        ".tar.xz",
+        ".txz"
+    };
+
+    private static readonly string[] CompoundArchiveExtensions =
+    [
+        ".tar.gz",
+        ".tar.bz2",
+        ".tar.xz"
+    ];
+
     public static bool IsImage(string path) => ImageExtensions.Contains(Path.GetExtension(path));
 
     public static bool IsAudio(string path) => AudioExtensions.Contains(Path.GetExtension(path));
@@ -59,13 +85,23 @@ public static class ImageFormat
         return AssetKinds.Image;
     }
 
-    public static bool IsZip(string path) => string.Equals(Path.GetExtension(path), ".zip", StringComparison.OrdinalIgnoreCase);
+    public static bool IsZip(string path) => ExtensionFor(path) is ".zip" or ".cbz";
 
-    public static bool IsRar(string path) => string.Equals(Path.GetExtension(path), ".rar", StringComparison.OrdinalIgnoreCase);
+    public static bool IsRar(string path) => ExtensionFor(path) is ".rar" or ".cbr";
 
-    public static bool IsArchive(string path) => IsZip(path) || IsRar(path);
+    public static bool IsArchive(string path) => ArchiveExtensions.Contains(ExtensionFor(path));
 
-    public static string ArchiveStableKeyPrefix(string path) => IsRar(path) ? "rar" : "zip";
+    public static string ArchiveStableKeyPrefix(string path)
+    {
+        return ExtensionFor(path) switch
+        {
+            ".zip" or ".cbz" => "zip",
+            ".rar" or ".cbr" => "rar",
+            ".7z" or ".cb7" => "7z",
+            ".tar" or ".cbt" or ".tar.gz" or ".tgz" or ".tar.bz2" or ".tbz" or ".tbz2" or ".tar.xz" or ".txz" => "tar",
+            _ => "archive"
+        };
+    }
 
     public static string ContentTypeFor(string path)
     {
@@ -91,5 +127,19 @@ public static class ImageFormat
             ".mkv" => "video/x-matroska",
             _ => "application/octet-stream"
         };
+    }
+
+    private static string ExtensionFor(string path)
+    {
+        var fileName = Path.GetFileName(path);
+        foreach (var compoundExtension in CompoundArchiveExtensions)
+        {
+            if (fileName.EndsWith(compoundExtension, StringComparison.OrdinalIgnoreCase))
+            {
+                return compoundExtension;
+            }
+        }
+
+        return Path.GetExtension(path).ToLowerInvariant();
     }
 }

@@ -9,8 +9,8 @@ The app is built for browsing first: scan a mounted folder, see previews immedia
 - Browses raw image files: `.jpg`, `.jpeg`, `.png`, `.gif`, `.webp`, `.bmp`.
 - Browses raw audio files: `.mp3`, `.m4a`, `.aac`, `.wav`, `.flac`, `.ogg`, `.opus`.
 - Browses raw video files: `.mp4`, `.m4v`, `.mov`, `.webm`, `.ogv`, `.avi`, `.mkv`.
-- Browses media inside `.zip` and `.rar` files without extracting the whole archive.
-- Browses media inside nested zip/rar archives with a default depth limit of `3`.
+- Browses media inside `.zip`, `.cbz`, `.rar`, `.cbr`, `.7z`, `.cb7`, `.tar`, `.cbt`, and common compressed tar files without extracting the whole archive.
+- Browses media inside nested archives with a default depth limit of `3`.
 - Preserves folder structure inside archives, including `archive!folder/folder/image.jpg` and `archive!folder/folder/inner.zip`.
 - Shows representative previews for folders and archives.
 - Opens folders, archives, nested archive folders, and nested archives as their own pages.

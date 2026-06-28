@@ -1,6 +1,6 @@
 # ArchiveImageLabeler
 
-ArchiveImageLabeler is a local-first media browser for large image and media libraries. It scans a read-only mounted library, indexes loose media plus archive contents, streams previews on demand, and stores user metadata in SQLite.
+ArchiveImageLabeler is a local-first media browser for large image and media libraries. It scans a read-only mounted library, indexes loose media plus archive contents, streams previews on demand, and stores user metadata in SQLite. Archive candidates include `.zip`, `.cbz`, `.rar`, `.cbr`, `.7z`, `.cb7`, `.tar`, `.cbt`, and common compressed tar files.
 
 The container is designed for local use with Docker Compose. Your media library is mounted read-only at `/library`; app data, SQLite, and Data Protection keys are stored under `/app/data`.
 

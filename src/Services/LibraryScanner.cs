@@ -521,6 +521,9 @@ public sealed class LibraryScanner(
                 return;
             }
 
+            var relativePath = Path.GetRelativePath(rootPath, filePath);
+            progress?.Report(new ScanProgress("Fingerprinting archive", relativePath, 0, 0, 0));
+
             try
             {
                 var stableKey = await CreateArchiveStableKeyAsync(file, cancellationToken);
@@ -529,14 +532,15 @@ public sealed class LibraryScanner(
                     parent.StableKey,
                     file.Name,
                     file.FullName,
-                    Path.GetRelativePath(rootPath, file.FullName),
+                    relativePath,
                     file.Length,
                     file.LastWriteTimeUtc,
                     parent.Depth + 1));
+                progress?.Report(new ScanProgress("Discovered archive", relativePath, 0, 0, 0));
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
             {
-                discovery.FileErrors.Add(new FileScanError(file.FullName, Path.GetRelativePath(rootPath, file.FullName), "Unable to read archive"));
+                discovery.FileErrors.Add(new FileScanError(file.FullName, relativePath, "Unable to read archive"));
                 logger.LogWarning(ex, "Unable to fingerprint archive {ArchivePath}", file.FullName);
             }
         }
