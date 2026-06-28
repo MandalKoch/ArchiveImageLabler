@@ -805,6 +805,75 @@ button:disabled {
     box-shadow: none;
 }
 
+.confirm-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 35;
+    display: grid;
+    place-items: center;
+    padding: 20px;
+    background: rgba(24, 25, 27, 0.42);
+}
+
+.confirm-dialog {
+    display: grid;
+    gap: 14px;
+    width: min(420px, 100%);
+    max-height: min(720px, calc(100vh - 40px));
+    overflow: auto;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 20px;
+    background: var(--panel);
+    box-shadow: var(--shadow);
+}
+
+.confirm-dialog h2,
+.confirm-dialog p {
+    margin: 0;
+}
+
+.archive-group-dialog {
+    width: min(520px, 100%);
+}
+
+.group-list {
+    display: grid;
+    gap: 8px;
+}
+
+.group-option {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 14px;
+    min-height: 44px;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    padding: 8px 10px;
+    background: #fbfaf7;
+    text-align: left;
+}
+
+.group-option:hover {
+    border-color: var(--accent);
+}
+
+.group-option span,
+.group-option small {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.group-option span {
+    font-weight: 800;
+}
+
+.group-option small {
+    color: var(--muted);
+}
+
 .drawer,
 .viewer {
     position: fixed;

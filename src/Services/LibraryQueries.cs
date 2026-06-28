@@ -314,6 +314,78 @@ public sealed class LibraryQueries(IDbContextFactory<LibraryDbContext> dbFactory
         await db.SaveChangesAsync(cancellationToken);
     }
 
+    public async Task<long> CreateArchiveGroupAsync(long archiveId, string groupName, CancellationToken cancellationToken = default)
+    {
+        await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
+        var archive = await db.Assets.SingleAsync(asset => asset.Id == archiveId, cancellationToken);
+        if (archive.Kind != AssetKinds.Zip)
+        {
+            throw new InvalidOperationException("Only archives can be added to archive groups.");
+        }
+
+        var parent = archive.ParentId is null
+            ? null
+            : await db.Assets.SingleOrDefaultAsync(asset => asset.Id == archive.ParentId.Value, cancellationToken);
+        var name = string.IsNullOrWhiteSpace(groupName) ? "Archive group" : groupName.Trim();
+        var relativePath = string.IsNullOrWhiteSpace(parent?.RelativePath)
+            ? name
+            : $"{parent.RelativePath}/{name}";
+        var group = new LibraryAsset
+        {
+            StableKey = $"group:{Guid.NewGuid():N}",
+            Parent = parent,
+            Name = name,
+            Kind = AssetKinds.Folder,
+            SourceType = AssetSourceTypes.ArchiveGroup,
+            RelativePath = relativePath,
+            SortKey = NaturalSortKey.Build(relativePath),
+            Depth = (parent?.Depth ?? -1) + 1,
+            IsAvailable = true
+        };
+
+        db.Assets.Add(group);
+        await db.SaveChangesAsync(cancellationToken);
+        await MoveArchiveAsync(db, archive, group, cancellationToken);
+        await db.SaveChangesAsync(cancellationToken);
+        return group.Id;
+    }
+
+    public async Task MoveArchiveToGroupAsync(long archiveId, long groupId, CancellationToken cancellationToken = default)
+    {
+        await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
+        var archive = await db.Assets.SingleAsync(asset => asset.Id == archiveId, cancellationToken);
+        var group = await db.Assets.SingleAsync(asset => asset.Id == groupId, cancellationToken);
+        if (archive.Kind != AssetKinds.Zip || group.SourceType != AssetSourceTypes.ArchiveGroup)
+        {
+            throw new InvalidOperationException("Archive groups can only contain archives.");
+        }
+
+        await MoveArchiveAsync(db, archive, group, cancellationToken);
+        await db.SaveChangesAsync(cancellationToken);
+    }
+
+    public async Task RemoveArchiveFromGroupAsync(long archiveId, CancellationToken cancellationToken = default)
+    {
+        await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
+        var archive = await db.Assets.SingleAsync(asset => asset.Id == archiveId, cancellationToken);
+        if (archive.ParentId is null)
+        {
+            return;
+        }
+
+        var group = await db.Assets.SingleOrDefaultAsync(asset => asset.Id == archive.ParentId.Value, cancellationToken);
+        if (group?.SourceType != AssetSourceTypes.ArchiveGroup)
+        {
+            return;
+        }
+
+        var parent = group.ParentId is null
+            ? null
+            : await db.Assets.SingleOrDefaultAsync(asset => asset.Id == group.ParentId.Value, cancellationToken);
+        await MoveArchiveAsync(db, archive, parent, cancellationToken);
+        await db.SaveChangesAsync(cancellationToken);
+    }
+
     public async Task<LabelSuggestions> GetLabelSuggestionsAsync(CancellationToken cancellationToken = default)
     {
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
@@ -386,6 +458,34 @@ public sealed class LibraryQueries(IDbContextFactory<LibraryDbContext> dbFactory
     private static bool IsFileSystemMediaSource(string sourceType)
     {
         return sourceType is AssetSourceTypes.FileSystemImage or AssetSourceTypes.FileSystemAudio or AssetSourceTypes.FileSystemVideo;
+    }
+
+    private static async Task MoveArchiveAsync(
+        LibraryDbContext db,
+        LibraryAsset archive,
+        LibraryAsset? parent,
+        CancellationToken cancellationToken)
+    {
+        var oldDepth = archive.Depth;
+        var newDepth = (parent?.Depth ?? -1) + 1;
+        var depthDelta = newDepth - oldDepth;
+
+        archive.Parent = parent;
+        archive.ParentId = parent?.Id;
+        archive.Depth = newDepth;
+        archive.UpdatedAt = DateTimeOffset.UtcNow;
+
+        if (depthDelta == 0)
+        {
+            return;
+        }
+
+        var descendantPrefix = archive.StableKey + "!";
+        await db.Assets
+            .Where(asset => asset.StableKey.StartsWith(descendantPrefix))
+            .ExecuteUpdateAsync(setters => setters
+                .SetProperty(asset => asset.Depth, asset => asset.Depth + depthDelta)
+                .SetProperty(asset => asset.UpdatedAt, DateTimeOffset.UtcNow), cancellationToken);
     }
 
     private static List<AssetCard> ArchiveCardsForContainer(

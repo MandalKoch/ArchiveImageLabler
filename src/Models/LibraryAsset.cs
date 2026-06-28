@@ -93,6 +93,7 @@ public static class AssetSourceTypes
     public const string FileSystemImage = "FileSystemImage";
     public const string FileSystemAudio = "FileSystemAudio";
     public const string FileSystemVideo = "FileSystemVideo";
+    public const string ArchiveGroup = "ArchiveGroup";
     public const string ZipArchivePreview = "ZipArchivePreview";
     public const string ZipArchive = "ZipArchive";
     public const string ZipFolderEntry = "ZipFolderEntry";

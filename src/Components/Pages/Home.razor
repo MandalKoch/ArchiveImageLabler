@@ -21,10 +21,10 @@
             <button class="@LabelAffeButtonClass" @onclick="ToggleLabelAffeAsync">
                 @(_labelAffeMode ? "Exit LabelAffe" : "LabelAffe")
             </button>
-            <button class="primary-button" @onclick="ScanAsync" disabled="@_isScanning" title="Refresh folders, keep archive previews, and prune missing entries. Full archive scans happen when opening an archive.">
-                @(_isScanning ? _scanStatus : "Scan")
+            <button class="primary-button" @onclick="ScanAsync" disabled="@IsRootScanBusy" title="Refresh folders, keep archive previews, and prune missing entries. Full archive scans happen when opening an archive.">
+                @(_isScanning ? _scanStatus : _isCountingScanArchives ? "Counting" : "Scan")
             </button>
-            <button class="danger-button" @onclick="RescanAsync" disabled="@_isScanning" title="Delete indexed assets, including tags, ratings, and descriptions, then run a fast scan">
+            <button class="danger-button" @onclick="RescanAsync" disabled="@IsRootScanBusy" title="Delete indexed assets, including tags, ratings, and descriptions, then run a fast scan">
                 Rescan
             </button>
             @if (_isScanning)
@@ -95,7 +95,7 @@
             <input type="checkbox" @bind="_unratedOnly" />
             Unrated
         </label>
-        <button class="secondary-button" @onclick="LoadAsync">Apply</button>
+        <button class="secondary-button" @onclick="() => LoadAsync()">Apply</button>
     </section>
 
     @if (_snapshot is null)
@@ -307,6 +307,7 @@
                             <button class="icon-button" title="Edit metadata" @onclick="() => EditAsset(selectedContainer)">Edit</button>
                             @if (selectedContainer.Kind == AssetKinds.Zip)
                             {
+                                <button class="secondary-button" @onclick="() => OpenGroupDialog(selectedContainer)">Group</button>
                                 <button class="secondary-button" @onclick="() => ToggleIgnoredAsync(selectedContainer)">
                                     @(selectedContainer.IsIgnored ? "Unignore" : "Ignore")
                                 </button>
@@ -322,6 +323,76 @@
         }
     }
 </div>
+
+@if (_pendingRootScan is not null)
+{
+    <div class="confirm-overlay" role="dialog" aria-modal="true" aria-labelledby="scan-confirm-title">
+        <section class="confirm-dialog">
+            <p class="eyebrow">Confirm scan</p>
+            <h2 id="scan-confirm-title">@(_pendingRootScan.IsRescan ? "Approve rescan" : "Approve scan")</h2>
+            @if (_isCountingScanArchives)
+            {
+                <p>Counting archives in @Options.Value.RootPath...</p>
+            }
+            else if (_scanConfirmationError is not null)
+            {
+                <p>@_scanConfirmationError</p>
+            }
+            else
+            {
+                <p><strong>@_pendingRootScan.ArchiveCount.GetValueOrDefault()</strong> archives found in @Options.Value.RootPath.</p>
+            }
+            <p class="muted">@(_pendingRootScan.IsRescan ? "Approve to clear the current index and rescan the library." : "Approve to scan the library and refresh archive previews.")</p>
+            <div class="drawer-actions flush">
+                <button class="primary-button" @onclick="ApprovePendingRootScanAsync" disabled="@_isCountingScanArchives">Approve</button>
+                <button class="secondary-button" @onclick="CancelPendingRootScan">Cancel</button>
+            </div>
+        </section>
+    </div>
+}
+
+@if (_groupingArchive is not null)
+{
+    <div class="confirm-overlay" role="dialog" aria-modal="true" aria-labelledby="group-dialog-title">
+        <section class="confirm-dialog archive-group-dialog">
+            <div class="panel-heading compact">
+                <div>
+                    <p class="eyebrow">Archive group</p>
+                    <h2 id="group-dialog-title">@_groupingArchive.DisplayName</h2>
+                    <p class="path dark">@_groupingArchive.RelativePath</p>
+                </div>
+                <button class="icon-button" title="Close" @onclick="CloseGroupDialog">x</button>
+            </div>
+
+            <label class="field flush">
+                <span>New group name</span>
+                <input @bind="_newGroupName" placeholder="Archive group" />
+            </label>
+
+            <div class="drawer-actions flush">
+                <button class="primary-button" @onclick="CreateArchiveGroupAsync">Create and add</button>
+                @if (IsArchiveInGroup(_groupingArchive))
+                {
+                    <button class="secondary-button" @onclick="RemoveArchiveFromGroupAsync">Remove from group</button>
+                }
+            </div>
+
+            @if (ArchiveGroups().Any())
+            {
+                <div class="group-list">
+                    <strong>Existing groups</strong>
+                    @foreach (var group in ArchiveGroups())
+                    {
+                        <button class="group-option" disabled="@(_groupingArchive.ParentId == group.Id)" @onclick="() => MoveArchiveToGroupAsync(group)">
+                            <span>@group.DisplayName</span>
+                            <small>@GroupStatus(group)</small>
+                        </button>
+                    }
+                </div>
+            }
+        </section>
+    </div>
+}
 
 @if (_editingAsset is not null)
 {
@@ -442,6 +513,9 @@
     private bool _unratedOnly;
     private bool _isScanning;
     private string _scanStatus = "Scanning";
+    private PendingRootScan? _pendingRootScan;
+    private bool _isCountingScanArchives;
+    private string? _scanConfirmationError;
     private bool _isArchiveScanning;
     private bool _isRefreshingArchivePreview;
     private ScanProgress? _folderScanProgress;
@@ -449,6 +523,8 @@
     private DateTimeOffset _lastArchivePreviewRefresh = DateTimeOffset.MinValue;
     private int _lastArchivePreviewImageCount;
     private AssetCard? _editingAsset;
+    private AssetCard? _groupingArchive;
+    private string _newGroupName = string.Empty;
     private AssetCard? _viewerAsset;
     private string _editLabelName = string.Empty;
     private string _editDescription = string.Empty;
@@ -480,6 +556,8 @@
 
     private string LabelAffeButtonClass => _labelAffeMode ? "secondary-button active-mode" : "secondary-button";
 
+    private bool IsRootScanBusy => _isScanning || _pendingRootScan is not null || _isCountingScanArchives;
+
     protected override async Task OnInitializedAsync()
     {
         await LoadAsync();
@@ -487,14 +565,74 @@
 
     private async Task ScanAsync()
     {
-        await RunRootScanAsync("Scanning", (progress, cancellationToken) => Scanner.ScanAsync(progress, cancellationToken));
+        await PrepareRootScanConfirmationAsync("Scanning", isRescan: false);
     }
 
     private async Task RescanAsync()
     {
-        await ClearUiForRescanAsync();
+        await PrepareRootScanConfirmationAsync("Rescanning", isRescan: true);
+    }
 
-        await RunRootScanAsync("Rescanning", (progress, cancellationToken) => Scanner.RescanAsync(progress, cancellationToken));
+    private async Task PrepareRootScanConfirmationAsync(string status, bool isRescan)
+    {
+        if (_isScanning || _isCountingScanArchives)
+        {
+            return;
+        }
+
+        _scanMessage = null;
+        _lastScan = null;
+        _scanConfirmationError = null;
+        _pendingRootScan = new PendingRootScan(status, isRescan, null);
+        _isCountingScanArchives = true;
+
+        try
+        {
+            var archiveCount = await Scanner.CountRootArchivesAsync();
+            if (_pendingRootScan is not null)
+            {
+                _pendingRootScan = _pendingRootScan with { ArchiveCount = archiveCount };
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            _pendingRootScan = null;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            _scanConfirmationError = "Unable to count archives before scanning. You can still approve to let the scan report detailed errors.";
+        }
+        finally
+        {
+            _isCountingScanArchives = false;
+        }
+    }
+
+    private async Task ApprovePendingRootScanAsync()
+    {
+        if (_pendingRootScan is not { } pending || _isCountingScanArchives)
+        {
+            return;
+        }
+
+        _pendingRootScan = null;
+        if (pending.IsRescan)
+        {
+            await ClearUiForRescanAsync();
+        }
+
+        Func<IProgress<ScanProgress>, CancellationToken, Task<ScanSummary>> scanOperation = pending.IsRescan
+            ? (progress, cancellationToken) => Scanner.RescanAsync(progress, cancellationToken)
+            : (progress, cancellationToken) => Scanner.ScanAsync(progress, cancellationToken);
+        await RunRootScanAsync(pending.Status, scanOperation);
+    }
+
+    private void CancelPendingRootScan()
+    {
+        var status = _pendingRootScan?.Status;
+        _pendingRootScan = null;
+        _scanConfirmationError = null;
+        _scanMessage = status is null ? null : $"{status} cancelled before starting.";
     }
 
     private async Task RunRootScanAsync(string status, Func<IProgress<ScanProgress>, CancellationToken, Task<ScanSummary>> scanOperation)
@@ -547,9 +685,9 @@
         _rootScanCancellation?.Cancel();
     }
 
-    private async Task LoadAsync()
+    private async Task LoadAsync(long? activeContainerId = null)
     {
-        _snapshot = await Library.GetSnapshotAsync(_snapshot?.ActiveContainerId, _search, SelectedRating, _unratedOnly);
+        _snapshot = await Library.GetSnapshotAsync(activeContainerId ?? _snapshot?.ActiveContainerId, _search, SelectedRating, _unratedOnly);
         PruneCollapsedSources();
         EnsureLabelArchiveSelected();
     }
@@ -661,6 +799,7 @@
         }
 
         _editingAsset = null;
+        _groupingArchive = null;
         _viewerAsset = null;
         _snapshot = null;
         _lastScan = null;
@@ -806,6 +945,79 @@
         }
 
         await InvokeAsync(StateHasChanged);
+    }
+
+    private void OpenGroupDialog(AssetCard archive)
+    {
+        _groupingArchive = archive;
+        _newGroupName = $"{CleanArchiveName(archive.DisplayName)} group".Trim();
+    }
+
+    private void CloseGroupDialog()
+    {
+        _groupingArchive = null;
+        _newGroupName = string.Empty;
+    }
+
+    private async Task CreateArchiveGroupAsync()
+    {
+        if (_groupingArchive is null)
+        {
+            return;
+        }
+
+        var groupId = await Library.CreateArchiveGroupAsync(_groupingArchive.Id, _newGroupName);
+        CloseGroupDialog();
+        await LoadAsync(groupId);
+    }
+
+    private async Task MoveArchiveToGroupAsync(AssetCard group)
+    {
+        if (_groupingArchive is null)
+        {
+            return;
+        }
+
+        await Library.MoveArchiveToGroupAsync(_groupingArchive.Id, group.Id);
+        CloseGroupDialog();
+        await LoadAsync(group.Id);
+    }
+
+    private async Task RemoveArchiveFromGroupAsync()
+    {
+        if (_groupingArchive is null)
+        {
+            return;
+        }
+
+        var archiveId = _groupingArchive.Id;
+        await Library.RemoveArchiveFromGroupAsync(archiveId);
+        CloseGroupDialog();
+        await LoadAsync(archiveId);
+    }
+
+    private IEnumerable<AssetCard> ArchiveGroups()
+    {
+        return _snapshot is null
+            ? Enumerable.Empty<AssetCard>()
+            : _snapshot.Containers
+            .Where(container => container.SourceType == AssetSourceTypes.ArchiveGroup)
+            .OrderBy(container => container.DisplayName, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(container => container.Id);
+    }
+
+    private bool IsArchiveInGroup(AssetCard archive)
+    {
+        return _snapshot?.Containers.Any(container =>
+            container.Id == archive.ParentId &&
+            container.SourceType == AssetSourceTypes.ArchiveGroup) == true;
+    }
+
+    private static string GroupStatus(AssetCard group)
+    {
+        var archiveText = group.ChildCount == 1 ? "1 archive" : $"{group.ChildCount} archives";
+        var mediaText = group.ImageCount == 1 ? "1 media file" : $"{group.ImageCount} media files";
+        return $"{archiveText} · {mediaText}";
     }
 
     private void EditAsset(AssetCard asset)
@@ -1364,7 +1576,7 @@
         var byId = _snapshot.Containers.ToDictionary(container => container.Id);
         if (_showArchivesOnly)
         {
-            return _snapshot.Containers.Where(container => container.Kind == AssetKinds.Zip);
+            return _snapshot.Containers.Where(container => container.Kind == AssetKinds.Zip || container.SourceType == AssetSourceTypes.ArchiveGroup);
         }
 
         return _snapshot.Containers.Where(container => IsSourceVisible(container, byId));
@@ -1441,6 +1653,7 @@
             AssetSourceTypes.FileSystemImage => "Image",
             AssetSourceTypes.FileSystemAudio => "Audio",
             AssetSourceTypes.FileSystemVideo => "Video",
+            AssetSourceTypes.ArchiveGroup => "Archive group",
             AssetSourceTypes.ZipArchivePreview => "Archive preview",
             AssetSourceTypes.ZipArchive => "Archive",
             AssetSourceTypes.ZipFolderEntry => "Archive folder",
@@ -1555,6 +1768,12 @@
             return "Ignored";
         }
 
+        if (asset.SourceType == AssetSourceTypes.ArchiveGroup)
+        {
+            var archiveText = asset.ChildCount == 1 ? "1 archive" : $"{asset.ChildCount} archives";
+            return $"{archiveText}, {asset.ImageCount} media files";
+        }
+
         if (asset.SourceType == AssetSourceTypes.ZipArchivePreview)
         {
             return asset.ImageCount > 0 ? "Media found, click to scan" : "Click to scan archive";
@@ -1601,6 +1820,8 @@
         var percent = done * 100d / progress.WorkTotal.Value;
         return $"{done} of {progress.WorkTotal.Value} {progress.WorkLabel ?? "items"} done ({percent:0.#}%)";
     }
+
+    private sealed record PendingRootScan(string Status, bool IsRescan, int? ArchiveCount);
 
     private async Task ConnectViewerKeyboardAsync()
     {
@@ -1677,4 +1898,3 @@
         _labelAutosaveCancellation?.Cancel();
     }
 }
-

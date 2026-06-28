@@ -18,6 +18,11 @@ public sealed class LibraryScanner(
 {
     private readonly LibraryOptions _options = options.Value;
 
+    public Task<int> CountRootArchivesAsync(CancellationToken cancellationToken = default)
+    {
+        return Task.Run(() => CountRootArchives(cancellationToken), cancellationToken);
+    }
+
     public async Task<ScanSummary> ScanAsync(IProgress<ScanProgress>? progress = null, CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
@@ -55,6 +60,67 @@ public sealed class LibraryScanner(
         {
             Pruned = await PruneUnavailableAsync(db, MutationBatchSize, cancellationToken)
         };
+    }
+
+    private int CountRootArchives(CancellationToken cancellationToken)
+    {
+        var rootPath = Path.GetFullPath(_options.RootPath);
+        if (!Directory.Exists(rootPath))
+        {
+            return 0;
+        }
+
+        var archiveCount = 0;
+        var pending = new Stack<string>();
+        pending.Push(rootPath);
+
+        while (pending.Count > 0)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var directoryPath = pending.Pop();
+
+            foreach (var childDirectory in EnumerateDirectoriesForPreflight(directoryPath))
+            {
+                pending.Push(childDirectory);
+            }
+
+            foreach (var filePath in EnumerateFilesForPreflight(directoryPath))
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                if (ImageFormat.IsArchive(filePath))
+                {
+                    archiveCount++;
+                }
+            }
+        }
+
+        return archiveCount;
+    }
+
+    private IEnumerable<string> EnumerateDirectoriesForPreflight(string directoryPath)
+    {
+        try
+        {
+            return Directory.EnumerateDirectories(directoryPath).ToList();
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            logger.LogWarning(ex, "Unable to enumerate directory {DirectoryPath} while counting archives", directoryPath);
+            return [];
+        }
+    }
+
+    private IEnumerable<string> EnumerateFilesForPreflight(string directoryPath)
+    {
+        try
+        {
+            return Directory.EnumerateFiles(directoryPath).ToList();
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            logger.LogWarning(ex, "Unable to enumerate files in {DirectoryPath} while counting archives", directoryPath);
+            return [];
+        }
     }
 
     private async Task<ScanSummary> ScanRootAsync(IProgress<ScanProgress>? progress, CancellationToken cancellationToken)
@@ -572,6 +638,9 @@ public sealed class LibraryScanner(
         var archiveFiles = discovery.ArchiveFiles
             .OrderBy(file => file.RelativePath, StringComparer.Ordinal)
             .ToList();
+        var archiveGroupsById = assets.Values
+            .Where(asset => asset.SourceType == AssetSourceTypes.ArchiveGroup)
+            .ToDictionary(asset => asset.Id);
         var scannedArchives = 0;
         var archiveTotal = archiveFiles.Count;
 
@@ -621,12 +690,21 @@ public sealed class LibraryScanner(
             assets.TryGetValue(archiveFile.StableKey, out var previousArchiveAsset);
             var previousArchiveSourcePath = previousArchiveAsset?.SourcePath;
             var previousArchiveRelativePath = previousArchiveAsset?.RelativePath;
+            var archiveParentForUpsert = archiveParent;
+            var archiveDepth = archiveFile.Depth;
+            if (previousArchiveAsset?.ParentId is long previousParentId &&
+                archiveGroupsById.TryGetValue(previousParentId, out var archiveGroup) &&
+                archiveGroup.IsAvailable)
+            {
+                archiveParentForUpsert = archiveGroup;
+                archiveDepth = archiveGroup.Depth + 1;
+            }
 
             var zipAsset = Upsert(
                 db,
                 assets,
                 stableKey: archiveFile.StableKey,
-                parent: archiveParent,
+                parent: archiveParentForUpsert,
                 name: archiveFile.Name,
                 kind: AssetKinds.Zip,
                 sourceType: AssetSourceTypes.ZipArchivePreview,
@@ -636,7 +714,7 @@ public sealed class LibraryScanner(
                 contentType: null,
                 sizeBytes: archiveFile.SizeBytes,
                 modifiedAt: archiveFile.ModifiedAt,
-                depth: archiveFile.Depth);
+                depth: archiveDepth);
 
             summary.Containers++;
             if (!string.Equals(previousArchiveSourcePath, zipAsset.SourcePath, StringComparison.Ordinal) ||
