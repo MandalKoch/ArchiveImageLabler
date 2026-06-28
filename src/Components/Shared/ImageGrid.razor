@@ -27,6 +27,7 @@ else
                 </button>
                 @RatingControls(archive)
                 <div class="archive-card-actions">
+                    <a class="quick-rating-clear" href="@SourcePageUrl(archive.Id)" target="_blank" rel="noopener">Page</a>
                     <button type="button" class="quick-rating-clear" @onclick="() => OnChooseArchivePreview.InvokeAsync(archive)">Preview</button>
                     @if (archive.Kind == AssetKinds.Zip)
                     {
@@ -80,6 +81,8 @@ else
     private long? _draggingArchiveId;
 
     private string MediaUrl(long id) => MediaUrlForAsset?.Invoke(id) ?? $"/api/assets/{id}/content";
+
+    private static string SourcePageUrl(long id) => $"/source/{id}";
 
     private static string Stars(int? rating) => rating is null ? "Unrated" : new string('*', rating.Value);
 

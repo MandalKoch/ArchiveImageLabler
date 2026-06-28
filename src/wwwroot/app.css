@@ -181,6 +181,7 @@ button:disabled {
     background: transparent;
     color: #a4a09a;
     line-height: 1;
+    text-decoration: none;
 }
 
 .quick-rating-star {

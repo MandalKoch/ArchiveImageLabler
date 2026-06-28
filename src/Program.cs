@@ -56,7 +56,7 @@ using (var scope = app.Services.CreateScope())
 {
     var dbFactory = scope.ServiceProvider.GetRequiredService<IDbContextFactory<LibraryDbContext>>();
     await using var db = await dbFactory.CreateDbContextAsync();
-    await EnsureLibrarySchemaAsync(db);
+    await LibrarySchemaInitializer.EnsureAsync(db);
 }
 
 // Configure the HTTP request pipeline.
@@ -119,67 +119,3 @@ app.MapRazorComponents<App>()
     .AddInteractiveServerRenderMode();
 
 app.Run();
-
-static async Task EnsureLibrarySchemaAsync(LibraryDbContext db)
-{
-    await db.Database.EnsureCreatedAsync();
-
-    var connection = db.Database.GetDbConnection();
-    if (connection.State != System.Data.ConnectionState.Open)
-    {
-        await connection.OpenAsync();
-    }
-
-    var columns = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-    await using (var command = connection.CreateCommand())
-    {
-        command.CommandText = "PRAGMA table_info('Assets');";
-        await using var reader = await command.ExecuteReaderAsync();
-        while (await reader.ReadAsync())
-        {
-            columns.Add(reader.GetString(1));
-        }
-    }
-
-    if (!columns.Contains(nameof(LibraryAsset.IsIgnored)))
-    {
-        await db.Database.ExecuteSqlRawAsync("ALTER TABLE Assets ADD COLUMN IsIgnored INTEGER NOT NULL DEFAULT 0;");
-    }
-
-    if (!columns.Contains(nameof(LibraryAsset.SortKey)))
-    {
-        await db.Database.ExecuteSqlRawAsync("ALTER TABLE Assets ADD COLUMN SortKey TEXT NOT NULL DEFAULT '';");
-    }
-
-    if (!columns.Contains(nameof(LibraryAsset.LabelName)))
-    {
-        await db.Database.ExecuteSqlRawAsync("ALTER TABLE Assets ADD COLUMN LabelName TEXT NOT NULL DEFAULT '';");
-    }
-
-    if (!columns.Contains(nameof(LibraryAsset.DisplayOrder)))
-    {
-        await db.Database.ExecuteSqlRawAsync("ALTER TABLE Assets ADD COLUMN DisplayOrder INTEGER NULL;");
-    }
-
-    if (!columns.Contains(nameof(LibraryAsset.PreviewAssetId)))
-    {
-        await db.Database.ExecuteSqlRawAsync("ALTER TABLE Assets ADD COLUMN PreviewAssetId INTEGER NULL;");
-    }
-
-    var assetsMissingSortKeys = await db.Assets
-        .Where(asset => asset.SortKey == string.Empty)
-        .ToListAsync();
-
-    if (assetsMissingSortKeys.Count > 0)
-    {
-        foreach (var asset in assetsMissingSortKeys)
-        {
-            asset.SortKey = NaturalSortKey.Build(string.IsNullOrWhiteSpace(asset.RelativePath) ? asset.Name : asset.RelativePath);
-        }
-
-        await db.SaveChangesAsync();
-    }
-
-    await db.Database.ExecuteSqlRawAsync("CREATE INDEX IF NOT EXISTS IX_Assets_IsIgnored ON Assets (IsIgnored);");
-    await db.Database.ExecuteSqlRawAsync("CREATE INDEX IF NOT EXISTS IX_Assets_SortKey ON Assets (SortKey);");
-}

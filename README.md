@@ -98,6 +98,14 @@ Run without Docker:
 dotnet run --urls http://localhost:5071
 ```
 
+Run a one-shot scan without opening the homepage:
+
+```powershell
+dotnet run --project .\scanner\ArchiveImageLabler.Scanner.csproj -- --env .\.env
+```
+
+The scanner console app reads the env file passed through `--env`, updates the same SQLite database, logs progress, and exits. See [scanner/README.md](scanner/README.md).
+
 For debugging, the intended development path is the Aspire AppHost in [apphost](apphost). The AppHost was created from the official `aspire-apphost` template and launches the Blazor app from [src](src). Later it can also launch local services such as Ollama or background indexing services. Docker Compose remains the runtime/deployment path.
 
 Run the Aspire AppHost:

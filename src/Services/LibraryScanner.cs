@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Diagnostics.CodeAnalysis;
 using System.Security.Cryptography;
 using System.Threading.Channels;
 using ArchiveImageLabler.Data;
@@ -645,12 +646,26 @@ public sealed class LibraryScanner(
         var archiveGroupsById = assets.Values
             .Where(asset => asset.SourceType == AssetSourceTypes.ArchiveGroup)
             .ToDictionary(asset => asset.Id);
+        var unchangedArchiveKeysByPath = assets.Values
+            .Where(asset =>
+                asset.Kind == AssetKinds.Zip &&
+                string.IsNullOrWhiteSpace(asset.EntryChain) &&
+                !string.IsNullOrWhiteSpace(asset.SourcePath) &&
+                asset.SizeBytes is not null &&
+                asset.ModifiedAt is not null)
+            .GroupBy(asset => asset.SourcePath!, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(
+                group => group.Key,
+                group => group.OrderByDescending(asset => asset.UpdatedAt).First(),
+                StringComparer.OrdinalIgnoreCase);
         var scannedArchives = 0;
         var archiveTotal = archiveFiles.Count;
+        var fingerprintedArchives = await FingerprintArchivesAsync(archiveFiles, unchangedArchiveKeysByPath, summary, progress, cancellationToken);
 
-        foreach (var archiveFile in archiveFiles)
+        foreach (var fingerprintedArchive in fingerprintedArchives)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            var archiveFile = fingerprintedArchive.Archive;
             if (!foldersByKey.TryGetValue(archiveFile.ParentStableKey, out var archiveParent))
             {
                 scannedArchives++;
@@ -666,26 +681,10 @@ public sealed class LibraryScanner(
                 continue;
             }
 
-            progress?.Report(new ScanProgress(
-                "Fingerprinting archive",
-                archiveFile.RelativePath,
-                summary.Images,
-                summary.Containers,
-                summary.Errors,
-                scannedArchives,
-                archiveTotal,
-                "archives"));
-
-            string stableKey;
-            try
-            {
-                stableKey = await CreateArchiveStableKeyAsync(new FileInfo(archiveFile.FullPath), cancellationToken);
-            }
-            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            if (fingerprintedArchive.Error is not null || fingerprintedArchive.StableKey is null)
             {
                 summary.Errors++;
                 scannedArchives++;
-                logger.LogWarning(ex, "Unable to fingerprint archive {ArchivePath}", archiveFile.FullPath);
                 progress?.Report(new ScanProgress(
                     "Unable to read archive",
                     archiveFile.RelativePath,
@@ -698,6 +697,7 @@ public sealed class LibraryScanner(
                 continue;
             }
 
+            var stableKey = fingerprintedArchive.StableKey;
             if (assets.TryGetValue(stableKey, out var existingZipAsset) && existingZipAsset.IsAvailable)
             {
                 scannedArchives++;
@@ -750,7 +750,15 @@ public sealed class LibraryScanner(
             }
 
             await db.SaveChangesAsync(cancellationToken);
-            progress?.Report(new ScanProgress("Found archive", zipAsset.RelativePath, summary.Images, summary.Containers, summary.Errors));
+            progress?.Report(new ScanProgress(
+                "Found archive",
+                zipAsset.RelativePath,
+                summary.Images,
+                summary.Containers,
+                summary.Errors,
+                scannedArchives + 1,
+                archiveTotal,
+                "archives"));
             if (zipAsset.IsIgnored)
             {
                 progress?.Report(new ScanProgress(
@@ -800,6 +808,102 @@ public sealed class LibraryScanner(
                 "archives"));
             await FlushScanBatchAsync(db, summary, SaveBatchSize, cancellationToken);
         }
+    }
+
+    private async Task<List<FingerprintedArchiveFile>> FingerprintArchivesAsync(
+        IReadOnlyList<DiscoveredArchiveFile> archiveFiles,
+        IReadOnlyDictionary<string, LibraryAsset> unchangedArchiveKeysByPath,
+        ScanSummary summary,
+        IProgress<ScanProgress>? progress,
+        CancellationToken cancellationToken)
+    {
+        if (archiveFiles.Count == 0)
+        {
+            return [];
+        }
+
+        var fingerprintedArchives = new ConcurrentBag<FingerprintedArchiveFile>();
+        var completed = 0;
+        await Parallel.ForEachAsync(
+            archiveFiles,
+            new ParallelOptions
+            {
+                MaxDegreeOfParallelism = ScanParallelism,
+                CancellationToken = cancellationToken
+            },
+            async (archiveFile, token) =>
+            {
+                if (TryGetUnchangedArchiveStableKey(archiveFile, unchangedArchiveKeysByPath, out var cachedStableKey))
+                {
+                    fingerprintedArchives.Add(new FingerprintedArchiveFile(archiveFile, cachedStableKey, null, IsCached: true));
+                    var cachedDone = Interlocked.Increment(ref completed);
+                    progress?.Report(new ScanProgress(
+                        "Reused archive hash",
+                        archiveFile.RelativePath,
+                        summary.Images,
+                        summary.Containers,
+                        summary.Errors,
+                        cachedDone,
+                        archiveFiles.Count,
+                        "archives"));
+                    return;
+                }
+
+                progress?.Report(new ScanProgress(
+                    "Fingerprinting archive",
+                    archiveFile.RelativePath,
+                    summary.Images,
+                    summary.Containers,
+                    summary.Errors,
+                    completed,
+                    archiveFiles.Count,
+                    "archives"));
+
+                try
+                {
+                    var stableKey = await CreateArchiveStableKeyAsync(new FileInfo(archiveFile.FullPath), token);
+                    fingerprintedArchives.Add(new FingerprintedArchiveFile(archiveFile, stableKey, null, IsCached: false));
+                }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                {
+                    logger.LogWarning(ex, "Unable to fingerprint archive {ArchivePath}", archiveFile.FullPath);
+                    fingerprintedArchives.Add(new FingerprintedArchiveFile(archiveFile, null, ex, IsCached: false));
+                }
+                finally
+                {
+                    var done = Interlocked.Increment(ref completed);
+                    progress?.Report(new ScanProgress(
+                        "Fingerprinted archive",
+                        archiveFile.RelativePath,
+                        summary.Images,
+                        summary.Containers,
+                        summary.Errors,
+                        done,
+                        archiveFiles.Count,
+                        "archives"));
+                }
+            });
+
+        return fingerprintedArchives
+            .OrderBy(file => file.Archive.RelativePath, StringComparer.Ordinal)
+            .ToList();
+    }
+
+    private static bool TryGetUnchangedArchiveStableKey(
+        DiscoveredArchiveFile archiveFile,
+        IReadOnlyDictionary<string, LibraryAsset> unchangedArchiveKeysByPath,
+        [NotNullWhen(true)] out string? stableKey)
+    {
+        stableKey = null;
+        if (!unchangedArchiveKeysByPath.TryGetValue(archiveFile.FullPath, out var existingArchive) ||
+            existingArchive.SizeBytes != archiveFile.SizeBytes ||
+            existingArchive.ModifiedAt != archiveFile.ModifiedAt)
+        {
+            return false;
+        }
+
+        stableKey = existingArchive.StableKey;
+        return true;
     }
 
     private async Task ScanZipFileAsync(
@@ -1418,6 +1522,12 @@ internal sealed record DiscoveredArchiveFile(
     long SizeBytes,
     DateTimeOffset? ModifiedAt,
     int Depth);
+
+internal sealed record FingerprintedArchiveFile(
+    DiscoveredArchiveFile Archive,
+    string? StableKey,
+    Exception? Error,
+    bool IsCached);
 
 internal sealed record DirectoryScanError(
     string StableKey,
