@@ -61,7 +61,8 @@
                 <strong>@_folderScanProgress.Phase</strong>
                 <span>@_folderScanProgress.CurrentItem</span>
             </div>
-            <div class="progress-bar"><span></span></div>
+            <div class="@ProgressBarClass(_folderScanProgress)"><span style="@ProgressBarStyle(_folderScanProgress)"></span></div>
+            <div class="progress-count">@ProgressWorkText(_folderScanProgress)</div>
             <small>@_folderScanProgress.Images media files · @_folderScanProgress.Containers containers · @_folderScanProgress.Errors errors</small>
         </section>
     }
@@ -73,21 +74,22 @@
                 <strong>@_archiveScanProgress.Phase</strong>
                 <span>@_archiveScanProgress.CurrentItem</span>
             </div>
-            <div class="progress-bar"><span></span></div>
+            <div class="@ProgressBarClass(_archiveScanProgress)"><span style="@ProgressBarStyle(_archiveScanProgress)"></span></div>
+            <div class="progress-count">@ProgressWorkText(_archiveScanProgress)</div>
             <small>@_archiveScanProgress.Images media files found · @_archiveScanProgress.Errors errors</small>
             <button class="secondary-button" @onclick="CancelArchiveScan">Cancel</button>
         </section>
     }
 
     <section class="filters">
-        <input placeholder="Search names, tags, descriptions" @bind="_search" @bind:event="oninput" />
+        <input placeholder="Search labels, names, tags, descriptions" @bind="_search" @bind:event="oninput" />
         <select @bind="_ratingFilter">
             <option value="">Any rating</option>
-            <option value="5">5 stars</option>
-            <option value="4">4 stars</option>
-            <option value="3">3 stars</option>
-            <option value="2">2 stars</option>
-            <option value="1">1 star</option>
+            <option value="5">5 stars only</option>
+            <option value="4">4+ stars</option>
+            <option value="3">3+ stars</option>
+            <option value="2">2+ stars</option>
+            <option value="1">1+ star</option>
         </select>
         <label class="check">
             <input type="checkbox" @bind="_unratedOnly" />
@@ -152,13 +154,13 @@
                         <div class="labelaffe-form">
                             <label class="field flush">
                                 <span>Archive name</span>
-                                <input @bind="_labelName" list="label-name-suggestions" placeholder="@archive.Name" />
+                                <input value="@_labelName" @oninput="HandleLabelNameInput" list="label-name-suggestions" placeholder="@archive.Name" />
                             </label>
 
                             <div class="suggestion-row">
                                 @foreach (var suggestion in NameSuggestions(archive).Take(8))
                                 {
-                                    <button class="suggestion-chip" @onclick="() => ApplyNameSuggestion(suggestion)">@suggestion</button>
+                                    <button class="suggestion-chip" @onclick="() => ApplyNameSuggestionAsync(suggestion)">@suggestion</button>
                                 }
                             </div>
 
@@ -166,7 +168,7 @@
                                 <span>Add tags</span>
                                 <div class="tag-entry">
                                     <input @bind="_labelTagInput" @bind:event="oninput" @onkeyup="HandleLabelTagKeyUp" list="tag-suggestions" placeholder="type tag and press Enter" />
-                                    <button class="secondary-button" @onclick="AddLabelTagFromInput">Add</button>
+                                    <button class="secondary-button" @onclick="AddLabelTagFromInputAsync">Add</button>
                                 </div>
                             </label>
 
@@ -181,7 +183,7 @@
                                     <div class="tag-chip-row">
                                         @foreach (var tag in _labelTags)
                                         {
-                                            <button class="tag-chip selected" title="Remove @tag" @onclick="() => RemoveLabelTag(tag)">
+                                            <button class="tag-chip selected" title="Remove @tag" @onclick="() => RemoveLabelTagAsync(tag)">
                                                 <span>@tag</span>
                                                 <strong aria-hidden="true">x</strong>
                                             </button>
@@ -193,25 +195,25 @@
                             <div class="suggestion-row">
                                 @foreach (var suggestion in TagSuggestions(archive).Take(16))
                                 {
-                                    <button class="suggestion-chip" @onclick="() => AddLabelTag(suggestion)">@suggestion</button>
+                                    <button class="suggestion-chip" @onclick="() => AddLabelTagAsync(suggestion)">@suggestion</button>
                                 }
                             </div>
 
                             <label class="field flush">
                                 <span>Description</span>
-                                <textarea @bind="_labelDescription" rows="5"></textarea>
+                                <textarea value="@_labelDescription" @oninput="HandleLabelDescriptionInput" rows="5"></textarea>
                             </label>
 
                             <div class="suggestion-row">
                                 @foreach (var suggestion in TextSuggestions(archive).Take(6))
                                 {
-                                    <button class="suggestion-chip text" @onclick="() => ApplyTextSuggestion(suggestion)">@suggestion</button>
+                                    <button class="suggestion-chip text" @onclick="() => ApplyTextSuggestionAsync(suggestion)">@suggestion</button>
                                 }
                             </div>
 
                             <label class="field flush compact-field">
                                 <span>Rating</span>
-                                <select @bind="_labelRating">
+                                <select value="@RatingInputValue(_labelRating)" @onchange="HandleLabelRatingChanged">
                                     <option value="">Unrated</option>
                                     <option value="5">5 stars</option>
                                     <option value="4">4 stars</option>
@@ -285,14 +287,22 @@
                     <div class="panel-actions">
                         @if (SelectedContainer is not null)
                         {
-                            <button class="icon-button" title="Edit metadata" @onclick="() => EditAsset(SelectedContainer)">Edit</button>
-                            @if (SelectedContainer.Kind == AssetKinds.Zip)
+                            var selectedContainer = SelectedContainer;
+                            <div class="quick-rating" aria-label="Rate @selectedContainer.DisplayName">
+                                @foreach (var rating in RatingValues)
+                                {
+                                    <button type="button" class="@QuickRatingButtonClass(selectedContainer, rating)" title="@($"Rate {rating} stars")" @onclick="() => RateAssetAsync(selectedContainer, rating)">&#9733;</button>
+                                }
+                                <button type="button" class="quick-rating-clear" title="Clear rating" @onclick="() => ClearAssetRatingAsync(selectedContainer)">Clear</button>
+                            </div>
+                            <button class="icon-button" title="Edit metadata" @onclick="() => EditAsset(selectedContainer)">Edit</button>
+                            @if (selectedContainer.Kind == AssetKinds.Zip)
                             {
-                                <button class="secondary-button" @onclick="() => ToggleIgnoredAsync(SelectedContainer)">
-                                    @(SelectedContainer.IsIgnored ? "Unignore" : "Ignore")
+                                <button class="secondary-button" @onclick="() => ToggleIgnoredAsync(selectedContainer)">
+                                    @(selectedContainer.IsIgnored ? "Unignore" : "Ignore")
                                 </button>
                             }
-                            <a class="secondary-button" href="@SourcePageUrl(SelectedContainer.Id)" target="_blank" rel="noopener">Open page</a>
+                            <a class="secondary-button" href="@SourcePageUrl(selectedContainer.Id)" target="_blank" rel="noopener">Open page</a>
                         }
                     </div>
                 </div>
@@ -376,6 +386,13 @@
                 <div class="viewer-controls">
                     <button class="secondary-button" @onclick="PreviousImage">Previous</button>
                     <button class="secondary-button" @onclick="NextImage">Next</button>
+                    <div class="quick-rating inverse" aria-label="Rate @_viewerAsset.DisplayName">
+                        @foreach (var rating in RatingValues)
+                        {
+                            <button type="button" class="@QuickRatingButtonClass(_viewerAsset, rating)" title="@($"Rate {rating} stars")" @onclick="() => RateAssetAsync(_viewerAsset, rating)">&#9733;</button>
+                        }
+                        <button type="button" class="quick-rating-clear" title="Clear rating" @onclick="() => ClearAssetRatingAsync(_viewerAsset)">Clear</button>
+                    </div>
                     <button class="primary-button" @onclick="() => EditAsset(_viewerAsset)">Edit</button>
                     <button class="icon-button" title="Close" @onclick="CloseViewer">x</button>
                 </div>
@@ -406,6 +423,8 @@
 }
 
 @code {
+    private static readonly int[] RatingValues = [1, 2, 3, 4, 5];
+
     private LibrarySnapshot? _snapshot;
     private ScanSummary? _lastScan;
     private string? _scanMessage;
@@ -441,6 +460,8 @@
     private readonly List<string> _labelTags = [];
     private int? _labelRating;
     private LabelSuggestions _labelSuggestions = new([], [], []);
+    private CancellationTokenSource? _labelAutosaveCancellation;
+    private bool _labelAffeDirty;
 
     private AssetCard? SelectedContainer => _snapshot?.Containers.SingleOrDefault(container => container.Id == _snapshot.ActiveContainerId);
 
@@ -526,6 +547,11 @@
 
     private async Task ToggleLabelAffeAsync()
     {
+        if (_labelAffeMode)
+        {
+            await FlushLabelAffeAutosaveAsync();
+        }
+
         _labelAffeMode = !_labelAffeMode;
         if (!_labelAffeMode)
         {
@@ -828,10 +854,12 @@
         _labelTags.AddRange(ParseTags(archive.Tags));
         _labelTagInput = string.Empty;
         _labelRating = archive.Rating;
+        _labelAffeDirty = false;
     }
 
     private async Task SelectLabelArchiveAsync(AssetCard? archive)
     {
+        await FlushLabelAffeAutosaveAsync();
         SelectLabelArchive(archive);
         await ScrollActiveLabelArchiveAsync();
     }
@@ -851,6 +879,7 @@
             ? 0
             : (index + direction + archives.Count) % archives.Count;
 
+        await FlushLabelAffeAutosaveAsync();
         SelectLabelArchive(archives[nextIndex]);
         await ScrollActiveLabelArchiveAsync();
         StateHasChanged();
@@ -886,6 +915,7 @@
     [JSInvokable]
     public async Task CloseLabelAffeFromKeyboard()
     {
+        await FlushLabelAffeAutosaveAsync();
         _labelAffeMode = false;
         await DisconnectLabelAffeKeyboardAsync();
         StateHasChanged();
@@ -893,16 +923,31 @@
 
     private async Task SaveLabelAffeAsync()
     {
-        if (SelectedLabelArchive is not { } archive)
+        CancelLabelAffeAutosave();
+        AddLabelTagFromInput();
+        await SaveLabelAffeDraftAsync(force: true);
+    }
+
+    private async Task SaveLabelAffeDraftAsync(bool force = false, CancellationToken cancellationToken = default)
+    {
+        if (SelectedLabelArchive is not { } archive || (!force && !_labelAffeDirty))
         {
             return;
         }
 
-        AddLabelTagFromInput();
-        await Library.SaveMetadataAsync(archive.Id, _labelName, _labelDescription, string.Join(", ", _labelTags), _labelRating);
-        _labelSuggestions = await Library.GetLabelSuggestionsAsync();
-        await LoadAsync();
-        SelectLabelArchive(LabelArchives().FirstOrDefault(item => item.Id == archive.Id));
+        var archiveId = archive.Id;
+        var labelName = _labelName;
+        var description = _labelDescription;
+        var tags = string.Join(", ", _labelTags);
+        var rating = _labelRating;
+
+        await Library.SaveMetadataAsync(archiveId, labelName, description, tags, rating, cancellationToken);
+        _labelSuggestions = await Library.GetLabelSuggestionsAsync(cancellationToken);
+        UpdateAssetMetadata(archiveId, labelName, description, tags, rating);
+        if (_labelArchiveId == archiveId)
+        {
+            _labelAffeDirty = false;
+        }
     }
 
     private async Task SaveAndNextLabelAffeAsync()
@@ -926,84 +971,191 @@
         SelectLabelArchive(archives[nextIndex]);
     }
 
-    private void AddLabelTagFromInput()
+    private async Task FlushLabelAffeAutosaveAsync()
     {
-        foreach (var tag in ParseTags(_labelTagInput))
-        {
-            AddLabelTag(tag);
-        }
-
-        _labelTagInput = string.Empty;
+        CancelLabelAffeAutosave();
+        await SaveLabelAffeDraftAsync();
     }
 
-    private void AddLabelTag(string tag)
+    private void QueueLabelAffeAutosave()
     {
-        tag = NormalizeTag(tag);
-        if (string.IsNullOrWhiteSpace(tag) || _labelTags.Contains(tag, StringComparer.OrdinalIgnoreCase))
+        if (SelectedLabelArchive is null)
         {
             return;
         }
 
-        _labelTags.Add(tag);
+        _labelAffeDirty = true;
+        CancelLabelAffeAutosave();
+        var cancellation = new CancellationTokenSource();
+        _labelAutosaveCancellation = cancellation;
+        _ = RunLabelAffeAutosaveAsync(cancellation);
     }
 
-    private void RemoveLabelTag(string tag)
+    private async Task RunLabelAffeAutosaveAsync(CancellationTokenSource cancellation)
     {
-        _labelTags.RemoveAll(item => string.Equals(item, tag, StringComparison.OrdinalIgnoreCase));
+        try
+        {
+            await Task.Delay(650, cancellation.Token);
+            await InvokeAsync(async () =>
+            {
+                if (_labelAutosaveCancellation == cancellation)
+                {
+                    _labelAutosaveCancellation = null;
+                }
+
+                await SaveLabelAffeDraftAsync(cancellationToken: cancellation.Token);
+                StateHasChanged();
+            });
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        finally
+        {
+            cancellation.Dispose();
+        }
     }
 
-    private void HandleLabelTagKeyUp(KeyboardEventArgs args)
+    private void CancelLabelAffeAutosave()
+    {
+        _labelAutosaveCancellation?.Cancel();
+        _labelAutosaveCancellation = null;
+    }
+
+    private void HandleLabelNameInput(ChangeEventArgs args)
+    {
+        _labelName = args.Value?.ToString() ?? string.Empty;
+        QueueLabelAffeAutosave();
+    }
+
+    private void HandleLabelDescriptionInput(ChangeEventArgs args)
+    {
+        _labelDescription = args.Value?.ToString() ?? string.Empty;
+        QueueLabelAffeAutosave();
+    }
+
+    private async Task HandleLabelRatingChanged(ChangeEventArgs args)
+    {
+        _labelRating = int.TryParse(args.Value?.ToString(), out var rating) ? rating : null;
+        _labelAffeDirty = true;
+        CancelLabelAffeAutosave();
+        await SaveLabelAffeDraftAsync();
+    }
+
+    private bool AddLabelTagFromInput()
+    {
+        var changed = false;
+        foreach (var tag in ParseTags(_labelTagInput))
+        {
+            changed |= AddLabelTag(tag);
+        }
+
+        _labelTagInput = string.Empty;
+        return changed;
+    }
+
+    private async Task AddLabelTagFromInputAsync()
+    {
+        if (!AddLabelTagFromInput())
+        {
+            return;
+        }
+
+        _labelAffeDirty = true;
+        CancelLabelAffeAutosave();
+        await SaveLabelAffeDraftAsync();
+    }
+
+    private bool AddLabelTag(string tag)
+    {
+        tag = NormalizeTag(tag);
+        if (string.IsNullOrWhiteSpace(tag) || _labelTags.Contains(tag, StringComparer.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        _labelTags.Add(tag);
+        return true;
+    }
+
+    private async Task AddLabelTagAsync(string tag)
+    {
+        if (!AddLabelTag(tag))
+        {
+            return;
+        }
+
+        _labelAffeDirty = true;
+        CancelLabelAffeAutosave();
+        await SaveLabelAffeDraftAsync();
+    }
+
+    private async Task RemoveLabelTagAsync(string tag)
+    {
+        if (_labelTags.RemoveAll(item => string.Equals(item, tag, StringComparison.OrdinalIgnoreCase)) == 0)
+        {
+            return;
+        }
+
+        _labelAffeDirty = true;
+        CancelLabelAffeAutosave();
+        await SaveLabelAffeDraftAsync();
+    }
+
+    private async Task HandleLabelTagKeyUp(KeyboardEventArgs args)
     {
         if (args.Key is "Enter" or "," or ";")
         {
-            AddLabelTagFromInput();
+            await AddLabelTagFromInputAsync();
         }
     }
 
     private IEnumerable<string> TagSuggestions(AssetCard archive)
     {
         var query = _labelTagInput.Trim();
-        return _labelSuggestions.Tags
-            .Concat(TokenSuggestions(archive))
+        return FileNameSuggestionParts(archive.Name)
+            .Concat(_labelSuggestions.Tags.OrderBy(tag => tag))
             .Select(NormalizeTag)
             .Where(tag => !string.IsNullOrWhiteSpace(tag))
             .Where(tag => string.IsNullOrWhiteSpace(query) || tag.Contains(query, StringComparison.OrdinalIgnoreCase))
             .Where(tag => !_labelTags.Contains(tag, StringComparer.OrdinalIgnoreCase))
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .OrderBy(tag => tag);
+            .Distinct(StringComparer.OrdinalIgnoreCase);
     }
 
     private IEnumerable<string> NameSuggestions(AssetCard archive)
     {
-        return new[] { CleanArchiveName(archive.Name), CleanArchiveName(archive.RelativePath) }
-            .Concat(_labelSuggestions.Names)
+        return FileNameSuggestions(archive.Name)
+            .Concat(_labelSuggestions.Names.OrderBy(name => name))
             .Where(name => !string.IsNullOrWhiteSpace(name))
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .OrderBy(name => name);
+            .Distinct(StringComparer.OrdinalIgnoreCase);
     }
 
     private IEnumerable<string> TextSuggestions(AssetCard archive)
     {
-        return new[]
-            {
-                string.IsNullOrWhiteSpace(_labelName) ? CleanArchiveName(archive.Name) : _labelName,
-                archive.RelativePath
-            }
+        return (string.IsNullOrWhiteSpace(_labelName)
+                ? FileNameSuggestions(archive.Name)
+                : new[] { _labelName }.Concat(FileNameSuggestionParts(archive.Name)))
             .Concat(_labelSuggestions.Text)
             .Where(text => !string.IsNullOrWhiteSpace(text))
             .Distinct(StringComparer.OrdinalIgnoreCase);
     }
 
-    private void ApplyNameSuggestion(string suggestion)
+    private async Task ApplyNameSuggestionAsync(string suggestion)
     {
         _labelName = suggestion;
+        _labelAffeDirty = true;
+        CancelLabelAffeAutosave();
+        await SaveLabelAffeDraftAsync();
     }
 
-    private void ApplyTextSuggestion(string suggestion)
+    private async Task ApplyTextSuggestionAsync(string suggestion)
     {
         _labelDescription = string.IsNullOrWhiteSpace(_labelDescription)
             ? suggestion
             : $"{_labelDescription.Trim()}\n{suggestion}";
+        _labelAffeDirty = true;
+        CancelLabelAffeAutosave();
+        await SaveLabelAffeDraftAsync();
     }
 
     private static IEnumerable<string> ParseTags(string tags)
@@ -1014,11 +1166,26 @@
             .Distinct(StringComparer.OrdinalIgnoreCase);
     }
 
-    private static IEnumerable<string> TokenSuggestions(AssetCard archive)
+    private static IEnumerable<string> FileNameSuggestions(string fileName)
     {
-        return $"{archive.Name} {archive.LabelName} {archive.RelativePath}"
-            .Split([' ', '_', '-', '.', '/', '\\', '(', ')', '[', ']'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-            .Where(token => token.Length > 2 && !token.All(char.IsDigit));
+        return new[] { CleanArchiveName(fileName) }
+            .Concat(FileNameSuggestionParts(fileName))
+            .Where(value => !string.IsNullOrWhiteSpace(value));
+    }
+
+    private static IEnumerable<string> FileNameSuggestionParts(string fileName)
+    {
+        return System.IO.Path.GetFileNameWithoutExtension(fileName)
+            .Split('-', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Select(CleanSuggestionPart)
+            .Where(part => part.Length > 2 && !part.All(char.IsDigit));
+    }
+
+    private static string CleanSuggestionPart(string value)
+    {
+        return value
+            .Replace('_', ' ')
+            .Trim();
     }
 
     private static string NormalizeTag(string tag)
@@ -1032,6 +1199,92 @@
             .Replace('_', ' ')
             .Replace('-', ' ')
             .Trim();
+    }
+
+    private static string RatingInputValue(int? rating)
+    {
+        return rating?.ToString() ?? string.Empty;
+    }
+
+    private void UpdateAssetMetadata(long id, string labelName, string description, string tags, int? rating)
+    {
+        if (_snapshot is not null)
+        {
+            _snapshot = _snapshot with
+            {
+                Containers = _snapshot.Containers.Select(asset => UpdateAssetCardMetadata(asset, id, labelName, description, tags, rating)).ToList(),
+                Archives = _snapshot.Archives.Select(asset => UpdateAssetCardMetadata(asset, id, labelName, description, tags, rating)).ToList(),
+                Images = _snapshot.Images.Select(asset => UpdateAssetCardMetadata(asset, id, labelName, description, tags, rating)).ToList()
+            };
+        }
+
+        if (_viewerAsset?.Id == id)
+        {
+            _viewerAsset = UpdateAssetCardMetadata(_viewerAsset, id, labelName, description, tags, rating);
+        }
+
+        if (_editingAsset?.Id == id)
+        {
+            _editingAsset = UpdateAssetCardMetadata(_editingAsset, id, labelName, description, tags, rating);
+        }
+    }
+
+    private static AssetCard UpdateAssetCardMetadata(AssetCard asset, long id, string labelName, string description, string tags, int? rating)
+    {
+        return asset.Id == id
+            ? asset with { LabelName = labelName.Trim(), Description = description.Trim(), Tags = string.Join(", ", ParseTags(tags)), Rating = rating is >= 1 and <= 5 ? rating : null }
+            : asset;
+    }
+
+    private async Task RateAssetAsync(AssetCard asset, int rating)
+    {
+        await SaveAssetRatingAsync(asset, rating);
+    }
+
+    private async Task ClearAssetRatingAsync(AssetCard asset)
+    {
+        await SaveAssetRatingAsync(asset, null);
+    }
+
+    private async Task SaveAssetRatingAsync(AssetCard asset, int? rating)
+    {
+        await Library.SaveMetadataAsync(asset.Id, asset.LabelName, asset.Description, asset.Tags, rating);
+        UpdateAssetRating(asset.Id, rating);
+    }
+
+    private void UpdateAssetRating(long id, int? rating)
+    {
+        var normalizedRating = rating is >= 1 and <= 5 ? rating : null;
+        if (_snapshot is not null)
+        {
+            _snapshot = _snapshot with
+            {
+                Containers = _snapshot.Containers.Select(asset => UpdateAssetCardRating(asset, id, normalizedRating)).ToList(),
+                Archives = _snapshot.Archives.Select(asset => UpdateAssetCardRating(asset, id, normalizedRating)).ToList(),
+                Images = _snapshot.Images.Select(asset => UpdateAssetCardRating(asset, id, normalizedRating)).ToList()
+            };
+        }
+
+        if (_viewerAsset?.Id == id)
+        {
+            _viewerAsset = _viewerAsset with { Rating = normalizedRating };
+        }
+
+        if (_editingAsset?.Id == id)
+        {
+            _editingAsset = _editingAsset with { Rating = normalizedRating };
+            _editRating = normalizedRating;
+        }
+    }
+
+    private static AssetCard UpdateAssetCardRating(AssetCard asset, long id, int? rating)
+    {
+        return asset.Id == id ? asset with { Rating = rating } : asset;
+    }
+
+    private static string QuickRatingButtonClass(AssetCard asset, int rating)
+    {
+        return asset.Rating >= rating ? "quick-rating-star active" : "quick-rating-star";
     }
 
     private void CloseEditor()
@@ -1301,6 +1554,35 @@
         return !asset.IsIgnored && (asset.SourceType == AssetSourceTypes.ZipArchivePreview || asset.ChildCount == 0);
     }
 
+    private static string ProgressBarClass(ScanProgress progress)
+    {
+        return progress.WorkTotal > 0 ? "progress-bar determinate" : "progress-bar";
+    }
+
+    private static string ProgressBarStyle(ScanProgress progress)
+    {
+        if (progress.WorkTotal is not > 0)
+        {
+            return string.Empty;
+        }
+
+        var done = Math.Clamp(progress.WorkDone ?? 0, 0, progress.WorkTotal.Value);
+        var percent = done * 100d / progress.WorkTotal.Value;
+        return $"--progress-value: {percent:0.##}%";
+    }
+
+    private static string ProgressWorkText(ScanProgress progress)
+    {
+        if (progress.WorkTotal is not > 0)
+        {
+            return string.Empty;
+        }
+
+        var done = Math.Clamp(progress.WorkDone.GetValueOrDefault(), 0, progress.WorkTotal.Value);
+        var percent = done * 100d / progress.WorkTotal.Value;
+        return $"{done} of {progress.WorkTotal.Value} {progress.WorkLabel ?? "items"} done ({percent:0.#}%)";
+    }
+
     private async Task ConnectViewerKeyboardAsync()
     {
         if (_keyboardConnected)
@@ -1373,6 +1655,7 @@
         _rootScanCancellation?.Dispose();
         _archiveScanCancellation?.Cancel();
         _archiveScanCancellation?.Dispose();
+        _labelAutosaveCancellation?.Cancel();
     }
 }
 

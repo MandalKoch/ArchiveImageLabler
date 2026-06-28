@@ -20,6 +20,13 @@
             <a class="secondary-button" href="/">Library</a>
             @if (_source is not null)
             {
+                <div class="quick-rating" aria-label="Rate @_source.DisplayName">
+                    @foreach (var rating in RatingValues)
+                    {
+                        <button type="button" class="@QuickRatingButtonClass(_source, rating)" title="@($"Rate {rating} stars")" @onclick="() => RateAssetAsync(_source, rating)">&#9733;</button>
+                    }
+                    <button type="button" class="quick-rating-clear" title="Clear rating" @onclick="() => ClearAssetRatingAsync(_source)">Clear</button>
+                </div>
                 <button class="icon-button" title="Edit metadata" @onclick="() => EditAsset(_source)">Edit</button>
                 @if (_source.Kind == AssetKinds.Zip)
                 {
@@ -45,21 +52,22 @@
                 <strong>@_archiveScanProgress.Phase</strong>
                 <span>@_archiveScanProgress.CurrentItem</span>
             </div>
-            <div class="progress-bar"><span></span></div>
+            <div class="@ProgressBarClass(_archiveScanProgress)"><span style="@ProgressBarStyle(_archiveScanProgress)"></span></div>
+            <div class="progress-count">@ProgressWorkText(_archiveScanProgress)</div>
             <small>@_archiveScanProgress.Images media files found · @_archiveScanProgress.Errors errors</small>
             <button class="secondary-button" @onclick="CancelArchiveScan">Cancel</button>
         </section>
     }
 
     <section class="filters">
-        <input placeholder="Search names, tags, descriptions" @bind="_search" @bind:event="oninput" />
+        <input placeholder="Search labels, names, tags, descriptions" @bind="_search" @bind:event="oninput" />
         <select @bind="_ratingFilter">
             <option value="">Any rating</option>
-            <option value="5">5 stars</option>
-            <option value="4">4 stars</option>
-            <option value="3">3 stars</option>
-            <option value="2">2 stars</option>
-            <option value="1">1 star</option>
+            <option value="5">5 stars only</option>
+            <option value="4">4+ stars</option>
+            <option value="3">3+ stars</option>
+            <option value="2">2+ stars</option>
+            <option value="1">1+ star</option>
         </select>
         <label class="check">
             <input type="checkbox" @bind="_unratedOnly" />
@@ -165,6 +173,13 @@
                 <div class="viewer-controls">
                     <button class="secondary-button" @onclick="PreviousImage">Previous</button>
                     <button class="secondary-button" @onclick="NextImage">Next</button>
+                    <div class="quick-rating inverse" aria-label="Rate @_viewerAsset.DisplayName">
+                        @foreach (var rating in RatingValues)
+                        {
+                            <button type="button" class="@QuickRatingButtonClass(_viewerAsset, rating)" title="@($"Rate {rating} stars")" @onclick="() => RateAssetAsync(_viewerAsset, rating)">&#9733;</button>
+                        }
+                        <button type="button" class="quick-rating-clear" title="Clear rating" @onclick="() => ClearAssetRatingAsync(_viewerAsset)">Clear</button>
+                    </div>
                     <button class="primary-button" @onclick="() => EditAsset(_viewerAsset)">Edit</button>
                     <button class="icon-button" title="Close" @onclick="CloseViewer">x</button>
                 </div>
@@ -195,6 +210,8 @@
 }
 
 @code {
+    private static readonly int[] RatingValues = [1, 2, 3, 4, 5];
+
     [Parameter] public long ContainerId { get; set; }
 
     private AssetCard? _source;
@@ -426,6 +443,54 @@
         _editingAsset = null;
     }
 
+    private async Task RateAssetAsync(AssetCard asset, int rating)
+    {
+        await SaveAssetRatingAsync(asset, rating);
+    }
+
+    private async Task ClearAssetRatingAsync(AssetCard asset)
+    {
+        await SaveAssetRatingAsync(asset, null);
+    }
+
+    private async Task SaveAssetRatingAsync(AssetCard asset, int? rating)
+    {
+        await Library.SaveMetadataAsync(asset.Id, asset.LabelName, asset.Description, asset.Tags, rating);
+        UpdateAssetRating(asset.Id, rating);
+    }
+
+    private void UpdateAssetRating(long id, int? rating)
+    {
+        var normalizedRating = rating is >= 1 and <= 5 ? rating : null;
+        if (_source?.Id == id)
+        {
+            _source = _source with { Rating = normalizedRating };
+        }
+
+        _images = _images.Select(asset => UpdateAssetCardRating(asset, id, normalizedRating)).ToList();
+
+        if (_viewerAsset?.Id == id)
+        {
+            _viewerAsset = _viewerAsset with { Rating = normalizedRating };
+        }
+
+        if (_editingAsset?.Id == id)
+        {
+            _editingAsset = _editingAsset with { Rating = normalizedRating };
+            _editRating = normalizedRating;
+        }
+    }
+
+    private static AssetCard UpdateAssetCardRating(AssetCard asset, long id, int? rating)
+    {
+        return asset.Id == id ? asset with { Rating = rating } : asset;
+    }
+
+    private static string QuickRatingButtonClass(AssetCard asset, int rating)
+    {
+        return asset.Rating >= rating ? "quick-rating-star active" : "quick-rating-star";
+    }
+
     private async Task SaveMetadataAsync()
     {
         if (_editingAsset is null)
@@ -556,6 +621,35 @@
     private static bool ShouldScanArchive(AssetCard asset)
     {
         return !asset.IsIgnored && (asset.SourceType == AssetSourceTypes.ZipArchivePreview || asset.ChildCount == 0);
+    }
+
+    private static string ProgressBarClass(ScanProgress progress)
+    {
+        return progress.WorkTotal > 0 ? "progress-bar determinate" : "progress-bar";
+    }
+
+    private static string ProgressBarStyle(ScanProgress progress)
+    {
+        if (progress.WorkTotal is not > 0)
+        {
+            return string.Empty;
+        }
+
+        var done = Math.Clamp(progress.WorkDone ?? 0, 0, progress.WorkTotal.Value);
+        var percent = done * 100d / progress.WorkTotal.Value;
+        return $"--progress-value: {percent:0.##}%";
+    }
+
+    private static string ProgressWorkText(ScanProgress progress)
+    {
+        if (progress.WorkTotal is not > 0)
+        {
+            return string.Empty;
+        }
+
+        var done = Math.Clamp(progress.WorkDone.GetValueOrDefault(), 0, progress.WorkTotal.Value);
+        var percent = done * 100d / progress.WorkTotal.Value;
+        return $"{done} of {progress.WorkTotal.Value} {progress.WorkLabel ?? "items"} done ({percent:0.#}%)";
     }
 
     private async Task ConnectViewerKeyboardAsync()

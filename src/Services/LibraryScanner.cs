@@ -37,8 +37,9 @@ public sealed class LibraryScanner(
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
         await db.Database.EnsureCreatedAsync(cancellationToken);
 
-        progress?.Report(new ScanProgress("Deleting indexed assets", _options.RootPath, 0, 0, 0));
-        var removed = await DeleteAllAssetsAsync(db, MutationBatchSize, cancellationToken);
+        var assetsToDelete = await db.Assets.CountAsync(cancellationToken);
+        progress?.Report(new ScanProgress("Deleting indexed assets", _options.RootPath, 0, 0, 0, 0, assetsToDelete, "assets"));
+        var removed = await DeleteAllAssetsAsync(db, MutationBatchSize, progress, _options.RootPath, assetsToDelete, cancellationToken);
 
         var summary = await ScanRootAsync(progress, cancellationToken);
         summary.Pruned = removed;
@@ -111,6 +112,15 @@ public sealed class LibraryScanner(
 
         progress?.Report(new ScanProgress("Scanning folders", rootPath, summary.Images, summary.Containers, summary.Errors));
         var discovery = await DiscoverFileSystemAssetsAsync(rootPath, progress, cancellationToken);
+        progress?.Report(new ScanProgress(
+            "Preparing archive previews",
+            $"{discovery.ArchiveFiles.Count} archives found",
+            summary.Images,
+            summary.Containers,
+            summary.Errors,
+            0,
+            discovery.ArchiveFiles.Count,
+            "archives"));
         await ApplyFileSystemDiscoveryAsync(db, assets, root, discovery, summary, progress, cancellationToken);
         MarkMissingArchiveDescendantsUnavailable(assets.Values);
 
@@ -559,17 +569,52 @@ public sealed class LibraryScanner(
             await FlushScanBatchAsync(db, summary, SaveBatchSize, cancellationToken);
         }
 
-        foreach (var archiveFile in discovery.ArchiveFiles.OrderBy(file => file.RelativePath, StringComparer.Ordinal))
+        var archiveFiles = discovery.ArchiveFiles
+            .OrderBy(file => file.RelativePath, StringComparer.Ordinal)
+            .ToList();
+        var scannedArchives = 0;
+        var archiveTotal = archiveFiles.Count;
+
+        foreach (var archiveFile in archiveFiles)
         {
             cancellationToken.ThrowIfCancellationRequested();
             if (!foldersByKey.TryGetValue(archiveFile.ParentStableKey, out var archiveParent))
             {
+                scannedArchives++;
+                progress?.Report(new ScanProgress(
+                    "Skipped archive",
+                    archiveFile.RelativePath,
+                    summary.Images,
+                    summary.Containers,
+                    summary.Errors,
+                    scannedArchives,
+                    archiveTotal,
+                    "archives"));
                 continue;
             }
 
+            progress?.Report(new ScanProgress(
+                "Quick scanning archives",
+                archiveFile.RelativePath,
+                summary.Images,
+                summary.Containers,
+                summary.Errors,
+                scannedArchives,
+                archiveTotal,
+                "archives"));
+
             if (assets.TryGetValue(archiveFile.StableKey, out var existingZipAsset) && existingZipAsset.IsAvailable)
             {
-                progress?.Report(new ScanProgress("Skipped duplicate archive", archiveFile.RelativePath, summary.Images, summary.Containers, summary.Errors));
+                scannedArchives++;
+                progress?.Report(new ScanProgress(
+                    "Skipped duplicate archive",
+                    archiveFile.RelativePath,
+                    summary.Images,
+                    summary.Containers,
+                    summary.Errors,
+                    scannedArchives,
+                    archiveTotal,
+                    "archives"));
                 continue;
             }
 
@@ -604,17 +649,51 @@ public sealed class LibraryScanner(
             if (zipAsset.IsIgnored)
             {
                 MarkArchiveDescendantsUnavailable(assets.Values, zipAsset.StableKey);
-                progress?.Report(new ScanProgress("Skipped ignored archive", zipAsset.RelativePath, summary.Images, summary.Containers, summary.Errors));
+                progress?.Report(new ScanProgress(
+                    "Skipped ignored archive",
+                    zipAsset.RelativePath,
+                    summary.Images,
+                    summary.Containers,
+                    summary.Errors,
+                    scannedArchives,
+                    archiveTotal,
+                    "archives"));
             }
             else if (ArchiveHasAvailablePreview(assets.Values, zipAsset.StableKey))
             {
-                progress?.Report(new ScanProgress("Reused archive preview", zipAsset.RelativePath, summary.Images, summary.Containers, summary.Errors));
+                progress?.Report(new ScanProgress(
+                    "Reused archive preview",
+                    zipAsset.RelativePath,
+                    summary.Images,
+                    summary.Containers,
+                    summary.Errors,
+                    scannedArchives,
+                    archiveTotal,
+                    "archives"));
             }
             else
             {
-                await ScanZipPreviewAsync(db, assets, zipAsset, archiveFile.FullPath, [], zipAsset.RelativePath, 1, summary, progress, cancellationToken);
+                var archiveProgress = progress is null
+                    ? null
+                    : new Progress<ScanProgress>(value => progress.Report(value with
+                    {
+                        WorkDone = scannedArchives,
+                        WorkTotal = archiveTotal,
+                        WorkLabel = "archives"
+                    }));
+                await ScanZipPreviewAsync(db, assets, zipAsset, archiveFile.FullPath, [], zipAsset.RelativePath, 1, summary, archiveProgress, cancellationToken);
             }
 
+            scannedArchives++;
+            progress?.Report(new ScanProgress(
+                "Archive quick scan complete",
+                zipAsset.RelativePath,
+                summary.Images,
+                summary.Containers,
+                summary.Errors,
+                scannedArchives,
+                archiveTotal,
+                "archives"));
             await FlushScanBatchAsync(db, summary, SaveBatchSize, cancellationToken);
         }
     }
@@ -1090,6 +1169,7 @@ public sealed class LibraryScanner(
             cancellationToken.ThrowIfCancellationRequested();
             var leafIds = await db.Assets
                 .Where(asset => !asset.IsAvailable && !db.Assets.Any(child => child.ParentId == asset.Id))
+                .OrderBy(asset => asset.Id)
                 .Select(asset => asset.Id)
                 .Take(batchSize)
                 .ToListAsync(cancellationToken);
@@ -1105,7 +1185,13 @@ public sealed class LibraryScanner(
         }
     }
 
-    private static async Task<int> DeleteAllAssetsAsync(LibraryDbContext db, int batchSize, CancellationToken cancellationToken)
+    private static async Task<int> DeleteAllAssetsAsync(
+        LibraryDbContext db,
+        int batchSize,
+        IProgress<ScanProgress>? progress,
+        string currentItem,
+        int totalAssets,
+        CancellationToken cancellationToken)
     {
         var deleted = 0;
 
@@ -1114,18 +1200,22 @@ public sealed class LibraryScanner(
             cancellationToken.ThrowIfCancellationRequested();
             var leafIds = await db.Assets
                 .Where(asset => !db.Assets.Any(child => child.ParentId == asset.Id))
+                .OrderBy(asset => asset.Id)
                 .Select(asset => asset.Id)
                 .Take(batchSize)
                 .ToListAsync(cancellationToken);
 
             if (leafIds.Count == 0)
             {
+                progress?.Report(new ScanProgress("Deleted indexed assets", currentItem, 0, 0, 0, deleted, totalAssets, "assets"));
                 return deleted;
             }
 
             deleted += await db.Assets
                 .Where(asset => leafIds.Contains(asset.Id))
                 .ExecuteDeleteAsync(cancellationToken);
+
+            progress?.Report(new ScanProgress("Deleting indexed assets", currentItem, 0, 0, 0, deleted, totalAssets, "assets"));
         }
     }
 
@@ -1252,4 +1342,7 @@ public sealed record ScanProgress(
     string CurrentItem,
     int Images,
     int Containers,
-    int Errors);
+    int Errors,
+    int? WorkDone = null,
+    int? WorkTotal = null,
+    string? WorkLabel = null);

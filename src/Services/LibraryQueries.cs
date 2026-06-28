@@ -332,29 +332,27 @@ public sealed class LibraryQueries(IDbContextFactory<LibraryDbContext> dbFactory
             })
             .ToListAsync(cancellationToken);
 
+        var labelArchives = assets
+            .Where(asset => IsLabelArchive(asset.Kind, asset.SourceType))
+            .ToList();
+
         var tags = assets
             .SelectMany(asset => SplitTags(asset.Tags))
+            .Concat(labelArchives.SelectMany(asset => FileNameSuggestionParts(asset.Name)).Select(tag => tag.ToLowerInvariant()))
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .OrderBy(tag => tag)
             .Take(80)
             .ToList();
 
-        var names = assets
-            .Where(asset => IsLabelArchive(asset.Kind, asset.SourceType))
-            .SelectMany(asset => new[]
-            {
-                asset.LabelName,
-                CleanArchiveName(asset.Name),
-                CleanArchiveName(Path.GetFileNameWithoutExtension(asset.RelativePath))
-            })
+        var names = labelArchives
+            .SelectMany(asset => new[] { asset.LabelName, CleanArchiveName(asset.Name) }.Concat(FileNameSuggestionParts(asset.Name)))
             .Where(value => !string.IsNullOrWhiteSpace(value))
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .OrderBy(value => value)
             .Take(80)
             .ToList();
 
-        var text = assets
-            .Where(asset => IsLabelArchive(asset.Kind, asset.SourceType))
+        var text = labelArchives
             .Select(asset => asset.Description)
             .Where(value => !string.IsNullOrWhiteSpace(value))
             .Distinct(StringComparer.OrdinalIgnoreCase)
@@ -438,20 +436,20 @@ public sealed class LibraryQueries(IDbContextFactory<LibraryDbContext> dbFactory
 
     private static IQueryable<LibraryAsset> ApplyFilters(IQueryable<LibraryAsset> query, string search, int? rating, bool unratedOnly)
     {
-        search = search.Trim();
-        if (!string.IsNullOrWhiteSpace(search))
+        foreach (var token in SearchTokens(search))
         {
+            var pattern = $"%{EscapeLikePattern(token)}%";
             query = query.Where(asset =>
-                asset.Name.Contains(search) ||
-                asset.LabelName.Contains(search) ||
-                asset.RelativePath.Contains(search) ||
-                asset.Tags.Contains(search) ||
-                asset.Description.Contains(search));
+                EF.Functions.Like(asset.Name, pattern, "\\") ||
+                EF.Functions.Like(asset.LabelName, pattern, "\\") ||
+                EF.Functions.Like(asset.RelativePath, pattern, "\\") ||
+                EF.Functions.Like(asset.Tags, pattern, "\\") ||
+                EF.Functions.Like(asset.Description, pattern, "\\"));
         }
 
         if (rating is >= 1 and <= 5)
         {
-            query = query.Where(asset => asset.Rating == rating);
+            query = query.Where(asset => asset.Rating >= rating);
         }
 
         if (unratedOnly)
@@ -464,23 +462,41 @@ public sealed class LibraryQueries(IDbContextFactory<LibraryDbContext> dbFactory
 
     private static bool MatchesFilters(AssetCard asset, string search, int? rating, bool unratedOnly)
     {
-        search = search.Trim();
-        if (!string.IsNullOrWhiteSpace(search) &&
-            !asset.Name.Contains(search, StringComparison.OrdinalIgnoreCase) &&
-            !asset.LabelName.Contains(search, StringComparison.OrdinalIgnoreCase) &&
-            !asset.RelativePath.Contains(search, StringComparison.OrdinalIgnoreCase) &&
-            !asset.Tags.Contains(search, StringComparison.OrdinalIgnoreCase) &&
-            !asset.Description.Contains(search, StringComparison.OrdinalIgnoreCase))
+        if (!SearchTokens(search).All(token => MatchesSearchToken(asset, token)))
         {
             return false;
         }
 
-        if (rating is >= 1 and <= 5 && asset.Rating != rating)
+        if (rating is >= 1 and <= 5 && asset.Rating < rating)
         {
             return false;
         }
 
         return !unratedOnly || asset.Rating is null;
+    }
+
+    private static IEnumerable<string> SearchTokens(string search)
+    {
+        return search
+            .Split([' ', '\t', '\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Where(token => !string.IsNullOrWhiteSpace(token));
+    }
+
+    private static bool MatchesSearchToken(AssetCard asset, string token)
+    {
+        return asset.Name.Contains(token, StringComparison.OrdinalIgnoreCase) ||
+            asset.LabelName.Contains(token, StringComparison.OrdinalIgnoreCase) ||
+            asset.RelativePath.Contains(token, StringComparison.OrdinalIgnoreCase) ||
+            asset.Tags.Contains(token, StringComparison.OrdinalIgnoreCase) ||
+            asset.Description.Contains(token, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string EscapeLikePattern(string value)
+    {
+        return value
+            .Replace("\\", "\\\\")
+            .Replace("%", "\\%")
+            .Replace("_", "\\_");
     }
 
     private static string NormalizeTags(string tags)
@@ -503,6 +519,14 @@ public sealed class LibraryQueries(IDbContextFactory<LibraryDbContext> dbFactory
             .Replace('_', ' ')
             .Replace('-', ' ')
             .Trim();
+    }
+
+    private static IEnumerable<string> FileNameSuggestionParts(string fileName)
+    {
+        return Path.GetFileNameWithoutExtension(fileName)
+            .Split('-', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Select(part => part.Replace('_', ' ').Trim())
+            .Where(part => part.Length > 2 && !part.All(char.IsDigit));
     }
 
     private static bool IsLabelArchive(string kind, string sourceType)
