@@ -60,6 +60,10 @@ public sealed class LibraryAsset
 
     public int? Rating { get; set; }
 
+    public int? DisplayOrder { get; set; }
+
+    public long? PreviewAssetId { get; set; }
+
     [MaxLength(1000)]
     public string Tags { get; set; } = string.Empty;
 

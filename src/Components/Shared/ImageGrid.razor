@@ -9,7 +9,13 @@ else
     <div class="image-grid">
         @foreach (var archive in Archives)
         {
-            <article @key="archive.Id" class="image-card archive-card">
+            <article @key="archive.Id"
+                     class="@ArchiveCardClass(archive)"
+                     draggable="true"
+                     @ondragstart="() => StartArchiveDrag(archive.Id)"
+                     @ondragend="ClearArchiveDrag"
+                     @ondragover:preventDefault="true"
+                     @ondrop="() => DropArchiveAsync(archive.Id)">
                 <button type="button" class="image-card-open" @onclick="() => OnOpenArchive.InvokeAsync(archive)">
                     <span class="archive-card-preview">
                         <Preview AssetId="archive.PreviewImageId" AssetKind="archive.PreviewKind" />
@@ -19,6 +25,12 @@ else
                     <span class="stars">@ArchiveStatus(archive)</span>
                 </button>
                 @RatingControls(archive)
+                <div class="archive-card-actions">
+                    <button type="button" class="quick-rating-clear" @onclick="() => OnChooseArchivePreview.InvokeAsync(archive)">Preview</button>
+                    <button type="button" class="quick-rating-clear" @onclick="() => OnToggleArchiveIgnored.InvokeAsync(archive)">
+                        @(archive.IsIgnored ? "Unignore" : "Ignore")
+                    </button>
+                </div>
             </article>
         }
 
@@ -48,13 +60,77 @@ else
 
     [Parameter] public EventCallback<AssetRatingChange> OnRate { get; set; }
 
-    private static string MediaUrl(long id) => $"/api/assets/{id}/content";
+    [Parameter] public EventCallback<AssetCard> OnToggleArchiveIgnored { get; set; }
+
+    [Parameter] public EventCallback<AssetCard> OnChooseArchivePreview { get; set; }
+
+    [Parameter] public EventCallback<IReadOnlyList<long>> OnArchiveReorder { get; set; }
+
+    [Parameter] public Func<long, string>? MediaUrlForAsset { get; set; }
+
+    private long? _draggingArchiveId;
+
+    private string MediaUrl(long id) => MediaUrlForAsset?.Invoke(id) ?? $"/api/assets/{id}/content";
 
     private static string Stars(int? rating) => rating is null ? "Unrated" : new string('*', rating.Value);
 
     private static string StatusBadge(AssetCard asset) => asset.IsIgnored ? "Ignored" : Stars(asset.Rating);
 
     private static string ArchiveStatus(AssetCard archive) => archive.IsIgnored ? "Ignored" : $"{archive.ImageCount} media files";
+
+    private string ArchiveCardClass(AssetCard archive)
+    {
+        var classes = new List<string> { "image-card", "archive-card" };
+        if (archive.IsIgnored)
+        {
+            classes.Add("ignored");
+        }
+
+        if (_draggingArchiveId == archive.Id)
+        {
+            classes.Add("dragging");
+        }
+
+        return string.Join(" ", classes);
+    }
+
+    private void StartArchiveDrag(long archiveId)
+    {
+        _draggingArchiveId = archiveId;
+    }
+
+    private void ClearArchiveDrag()
+    {
+        _draggingArchiveId = null;
+    }
+
+    private async Task DropArchiveAsync(long targetArchiveId)
+    {
+        if (_draggingArchiveId is not { } sourceArchiveId || sourceArchiveId == targetArchiveId)
+        {
+            ClearArchiveDrag();
+            return;
+        }
+
+        var orderedIds = Archives.Select(archive => archive.Id).ToList();
+        var sourceIndex = orderedIds.IndexOf(sourceArchiveId);
+        var targetIndex = orderedIds.IndexOf(targetArchiveId);
+        if (sourceIndex < 0 || targetIndex < 0)
+        {
+            ClearArchiveDrag();
+            return;
+        }
+
+        orderedIds.RemoveAt(sourceIndex);
+        if (sourceIndex < targetIndex)
+        {
+            targetIndex--;
+        }
+
+        orderedIds.Insert(targetIndex, sourceArchiveId);
+        ClearArchiveDrag();
+        await OnArchiveReorder.InvokeAsync(orderedIds);
+    }
 
     private static string AssetTypeLabel(AssetCard asset)
     {
@@ -109,7 +185,7 @@ else
         builder.CloseElement();
     };
 
-    private static RenderFragment MediaThumb(AssetCard asset) => builder =>
+    private RenderFragment MediaThumb(AssetCard asset) => builder =>
     {
         if (asset.IsImage)
         {

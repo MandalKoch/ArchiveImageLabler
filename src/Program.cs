@@ -36,7 +36,10 @@ builder.Services.AddDbContextFactory<LibraryDbContext>(options =>
     options.UseSqlite($"Data Source={dbPath}"));
 builder.Services.AddScoped<LibraryScanner>();
 builder.Services.AddScoped<LibraryQueries>();
+builder.Services.AddSingleton<BackgroundScanQueue>();
+builder.Services.AddHostedService<BackgroundScanWorker>();
 builder.Services.AddSingleton<ImageContentService>();
+builder.Services.AddSingleton<SourceExtractionCache>();
 
 if (builder.Environment.IsDevelopment() && builder.Configuration.GetValue<bool>("Debug:StopApplicationOnLastBrowserClose"))
 {
@@ -96,6 +99,20 @@ app.MapGet("/api/assets/{id:long}/content", async (
     }
 });
 
+app.MapGet("/api/source-cache/{sessionId}/{assetId:long}", (
+    string sessionId,
+    long assetId,
+    SourceExtractionCache extractionCache) =>
+{
+    var file = extractionCache.GetFile(sessionId, assetId);
+    if (file is null || !System.IO.File.Exists(file.Path))
+    {
+        return Results.NotFound();
+    }
+
+    return Results.File(System.IO.File.OpenRead(file.Path), file.ContentType, enableRangeProcessing: true);
+});
+
 app.MapRazorComponents<App>()
     .AddInteractiveServerRenderMode();
 
@@ -135,6 +152,16 @@ static async Task EnsureLibrarySchemaAsync(LibraryDbContext db)
     if (!columns.Contains(nameof(LibraryAsset.LabelName)))
     {
         await db.Database.ExecuteSqlRawAsync("ALTER TABLE Assets ADD COLUMN LabelName TEXT NOT NULL DEFAULT '';");
+    }
+
+    if (!columns.Contains(nameof(LibraryAsset.DisplayOrder)))
+    {
+        await db.Database.ExecuteSqlRawAsync("ALTER TABLE Assets ADD COLUMN DisplayOrder INTEGER NULL;");
+    }
+
+    if (!columns.Contains(nameof(LibraryAsset.PreviewAssetId)))
+    {
+        await db.Database.ExecuteSqlRawAsync("ALTER TABLE Assets ADD COLUMN PreviewAssetId INTEGER NULL;");
     }
 
     var assetsMissingSortKeys = await db.Assets

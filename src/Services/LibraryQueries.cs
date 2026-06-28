@@ -19,7 +19,8 @@ public sealed class LibraryQueries(IDbContextFactory<LibraryDbContext> dbFactory
         var containerRows = await db.Assets
             .AsNoTracking()
             .Where(asset => asset.IsAvailable && (asset.Kind == AssetKinds.Folder || asset.Kind == AssetKinds.Zip))
-            .OrderBy(asset => asset.SortKey)
+            .OrderBy(asset => asset.DisplayOrder ?? int.MaxValue)
+            .ThenBy(asset => asset.SortKey)
             .ThenBy(asset => asset.Id)
             .Select(asset => new ContainerRow(
                 asset.Id,
@@ -33,6 +34,8 @@ public sealed class LibraryQueries(IDbContextFactory<LibraryDbContext> dbFactory
                 asset.Description,
                 asset.Tags,
                 asset.Rating,
+                asset.DisplayOrder,
+                asset.PreviewAssetId,
                 asset.IsIgnored,
                 asset.ScanError))
             .ToListAsync(cancellationToken);
@@ -50,6 +53,8 @@ public sealed class LibraryQueries(IDbContextFactory<LibraryDbContext> dbFactory
                 container.Description,
                 container.Tags,
                 container.Rating,
+                container.DisplayOrder,
+                container.PreviewAssetId,
                 container.IsIgnored,
                 container.ScanError,
                 0,
@@ -85,7 +90,10 @@ public sealed class LibraryQueries(IDbContextFactory<LibraryDbContext> dbFactory
             .Select(container =>
             {
                 var mediaRows = MediaForContainer(container, containerRows, childrenByParent, childRows);
-                var preview = mediaRows
+                var manualPreview = container.PreviewAssetId is long previewAssetId
+                    ? mediaRows.FirstOrDefault(media => media.Id == previewAssetId && media.Kind is AssetKinds.Image or AssetKinds.Video)
+                    : null;
+                var preview = manualPreview ?? mediaRows
                     .Where(media => media.Kind is AssetKinds.Image or AssetKinds.Video)
                     .OrderBy(media => media.Kind == AssetKinds.Image ? 0 : 1)
                     .ThenBy(media => media.Id)
@@ -131,10 +139,9 @@ public sealed class LibraryQueries(IDbContextFactory<LibraryDbContext> dbFactory
 
         imageQuery = ApplyFilters(imageQuery, search, rating, unratedOnly);
 
-        var images = await imageQuery
+        var imageCandidates = await imageQuery
             .OrderBy(asset => asset.SortKey)
             .ThenBy(asset => asset.Id)
-            .Take(240)
             .Select(asset => new AssetCard(
                 asset.Id,
                 asset.ParentId,
@@ -147,6 +154,8 @@ public sealed class LibraryQueries(IDbContextFactory<LibraryDbContext> dbFactory
                 asset.Description,
                 asset.Tags,
                 asset.Rating,
+                null,
+                null,
                 asset.IsIgnored,
                 asset.ScanError,
                 0,
@@ -154,6 +163,13 @@ public sealed class LibraryQueries(IDbContextFactory<LibraryDbContext> dbFactory
                 asset.Id,
                 asset.Kind))
             .ToListAsync(cancellationToken);
+        var containersById = containerRows.ToDictionary(container => container.Id);
+        var images = imageCandidates
+            .OrderBy(image => MediaDisplayOrder(image, containersById))
+            .ThenBy(image => NaturalSortKey.Build(image.RelativePath))
+            .ThenBy(image => image.Id)
+            .Take(240)
+            .ToList();
 
         var archives = activeContainer is null
             ? []
@@ -194,6 +210,8 @@ public sealed class LibraryQueries(IDbContextFactory<LibraryDbContext> dbFactory
                 asset.Description,
                 asset.Tags,
                 asset.Rating,
+                asset.DisplayOrder,
+                asset.PreviewAssetId,
                 asset.IsIgnored,
                 asset.ScanError))
             .ToListAsync(cancellationToken);
@@ -229,10 +247,9 @@ public sealed class LibraryQueries(IDbContextFactory<LibraryDbContext> dbFactory
 
         query = ApplyFilters(query, search, rating, unratedOnly);
 
-        return await query
+        var imageCandidates = await query
             .OrderBy(asset => asset.SortKey)
             .ThenBy(asset => asset.Id)
-            .Take(500)
             .Select(asset => new AssetCard(
                 asset.Id,
                 asset.ParentId,
@@ -245,6 +262,8 @@ public sealed class LibraryQueries(IDbContextFactory<LibraryDbContext> dbFactory
                 asset.Description,
                 asset.Tags,
                 asset.Rating,
+                null,
+                null,
                 asset.IsIgnored,
                 asset.ScanError,
                 0,
@@ -252,6 +271,14 @@ public sealed class LibraryQueries(IDbContextFactory<LibraryDbContext> dbFactory
                 asset.Id,
                 asset.Kind))
             .ToListAsync(cancellationToken);
+
+        var containersById = containerRows.ToDictionary(row => row.Id);
+        return imageCandidates
+            .OrderBy(image => MediaDisplayOrder(image, containersById))
+            .ThenBy(image => NaturalSortKey.Build(image.RelativePath))
+            .ThenBy(image => image.Id)
+            .Take(500)
+            .ToList();
     }
 
     public async Task<AssetCard?> GetAssetAsync(long id, CancellationToken cancellationToken = default)
@@ -272,6 +299,8 @@ public sealed class LibraryQueries(IDbContextFactory<LibraryDbContext> dbFactory
                 asset.Description,
                 asset.Tags,
                 asset.Rating,
+                asset.DisplayOrder,
+                asset.PreviewAssetId,
                 asset.IsIgnored,
                 asset.ScanError,
                 0,
@@ -300,17 +329,64 @@ public sealed class LibraryQueries(IDbContextFactory<LibraryDbContext> dbFactory
         asset.IsIgnored = isIgnored;
         asset.UpdatedAt = DateTimeOffset.UtcNow;
 
-        if (asset.Kind == AssetKinds.Zip && isIgnored)
+        await db.SaveChangesAsync(cancellationToken);
+    }
+
+    public async Task SaveArchiveDisplayOrderAsync(IReadOnlyList<long> archiveIds, CancellationToken cancellationToken = default)
+    {
+        await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
+        var orderById = archiveIds
+            .Select((id, index) => new { id, index })
+            .ToDictionary(item => item.id, item => item.index);
+
+        var assets = await db.Assets
+            .Where(asset => orderById.Keys.Contains(asset.Id) && asset.Kind == AssetKinds.Zip)
+            .ToListAsync(cancellationToken);
+
+        foreach (var asset in assets)
         {
-            var descendantPrefix = asset.StableKey + "!";
-            await db.Assets
-                .Where(descendant => descendant.StableKey.StartsWith(descendantPrefix))
-                .ExecuteUpdateAsync(setters => setters
-                    .SetProperty(descendant => descendant.IsAvailable, false)
-                    .SetProperty(descendant => descendant.ScanError, (string?)null)
-                    .SetProperty(descendant => descendant.UpdatedAt, DateTimeOffset.UtcNow), cancellationToken);
+            asset.DisplayOrder = orderById[asset.Id];
+            asset.UpdatedAt = DateTimeOffset.UtcNow;
         }
 
+        await db.SaveChangesAsync(cancellationToken);
+    }
+
+    public async Task SetContainerPreviewAsync(long containerId, long? previewAssetId, CancellationToken cancellationToken = default)
+    {
+        await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
+        var container = await db.Assets.SingleAsync(asset => asset.Id == containerId, cancellationToken);
+        if (container.Kind is not (AssetKinds.Folder or AssetKinds.Zip))
+        {
+            throw new InvalidOperationException("Only containers can have a manual preview.");
+        }
+
+        if (previewAssetId is not long selectedPreviewId)
+        {
+            container.PreviewAssetId = null;
+            container.UpdatedAt = DateTimeOffset.UtcNow;
+            await db.SaveChangesAsync(cancellationToken);
+            return;
+        }
+
+        var preview = await db.Assets
+            .AsNoTracking()
+            .Where(asset =>
+                asset.Id == selectedPreviewId &&
+                asset.IsAvailable &&
+                !asset.IsIgnored &&
+                (asset.Kind == AssetKinds.Image || asset.Kind == AssetKinds.Video))
+            .Select(asset => new { asset.Id, asset.ParentId })
+            .SingleOrDefaultAsync(cancellationToken)
+            ?? throw new InvalidOperationException("Preview asset is not an available image or video.");
+
+        if (!await IsDescendantOfAsync(db, preview.ParentId, container.Id, cancellationToken))
+        {
+            throw new InvalidOperationException("Preview asset does not belong to this container.");
+        }
+
+        container.PreviewAssetId = preview.Id;
+        container.UpdatedAt = DateTimeOffset.UtcNow;
         await db.SaveChangesAsync(cancellationToken);
     }
 
@@ -455,9 +531,51 @@ public sealed class LibraryQueries(IDbContextFactory<LibraryDbContext> dbFactory
                 .ToList();
     }
 
+    private static int MediaDisplayOrder(AssetCard media, Dictionary<long, ContainerRow> containersById)
+    {
+        var parentId = media.ParentId;
+        var order = int.MaxValue;
+
+        while (parentId is long currentParentId && containersById.TryGetValue(currentParentId, out var parent))
+        {
+            if (parent.DisplayOrder is int displayOrder)
+            {
+                order = displayOrder;
+                break;
+            }
+
+            parentId = parent.ParentId;
+        }
+
+        return order;
+    }
+
     private static bool IsFileSystemMediaSource(string sourceType)
     {
         return sourceType is AssetSourceTypes.FileSystemImage or AssetSourceTypes.FileSystemAudio or AssetSourceTypes.FileSystemVideo;
+    }
+
+    private static async Task<bool> IsDescendantOfAsync(
+        LibraryDbContext db,
+        long? parentId,
+        long ancestorId,
+        CancellationToken cancellationToken)
+    {
+        while (parentId is long currentParentId)
+        {
+            if (currentParentId == ancestorId)
+            {
+                return true;
+            }
+
+            parentId = await db.Assets
+                .AsNoTracking()
+                .Where(asset => asset.Id == currentParentId)
+                .Select(asset => asset.ParentId)
+                .SingleOrDefaultAsync(cancellationToken);
+        }
+
+        return false;
     }
 
     private static async Task MoveArchiveAsync(
@@ -504,7 +622,8 @@ public sealed class LibraryQueries(IDbContextFactory<LibraryDbContext> dbFactory
                 asset.ParentId is not null &&
                 parentIds.Contains(asset.ParentId.Value))
             .Where(asset => MatchesFilters(asset, search, rating, unratedOnly))
-            .OrderBy(asset => NaturalSortKey.Build(asset.RelativePath))
+            .OrderBy(asset => asset.DisplayOrder ?? int.MaxValue)
+            .ThenBy(asset => NaturalSortKey.Build(asset.RelativePath))
             .ThenBy(asset => asset.Id)
             .Take(120)
             .ToList();
@@ -647,6 +766,8 @@ public sealed class LibraryQueries(IDbContextFactory<LibraryDbContext> dbFactory
         string Description,
         string Tags,
         int? Rating,
+        int? DisplayOrder,
+        long? PreviewAssetId,
         bool IsIgnored,
         string? ScanError);
 
@@ -672,6 +793,8 @@ public sealed record AssetCard(
     string Description,
     string Tags,
     int? Rating,
+    int? DisplayOrder,
+    long? PreviewAssetId,
     bool IsIgnored,
     string? ScanError,
     int ImageCount,
@@ -686,6 +809,8 @@ public sealed record AssetCard(
     public bool IsVideo => Kind == AssetKinds.Video;
 
     public bool IsMedia => IsImage || IsAudio || IsVideo;
+
+    public bool IsContainer => Kind is AssetKinds.Folder or AssetKinds.Zip;
 
     public string DisplayName => string.IsNullOrWhiteSpace(LabelName) ? Name : LabelName;
 }

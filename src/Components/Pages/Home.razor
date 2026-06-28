@@ -2,6 +2,7 @@
 @rendermode InteractiveServer
 @inject LibraryScanner Scanner
 @inject LibraryQueries Library
+@inject BackgroundScanQueue RootScanQueue
 @inject IOptions<LibraryOptions> Options
 @inject IJSRuntime JsRuntime
 @implements IAsyncDisposable
@@ -18,6 +19,7 @@
 
         <div class="toolbar">
             <MemoryUsage />
+            <StorageUsage />
             <button class="@LabelAffeButtonClass" @onclick="ToggleLabelAffeAsync">
                 @(_labelAffeMode ? "Exit LabelAffe" : "LabelAffe")
             </button>
@@ -270,7 +272,13 @@
                 @foreach (var container in VisibleContainers())
                 {
                     var hasChildren = !_showArchivesOnly && HasSourceChildren(container);
-                    <div class="source-tree-row" style="@SourceIndent(container, _showArchivesOnly)">
+                    <div class="@SourceTreeRowClass(container)"
+                         style="@SourceIndent(container)"
+                         draggable="@IsReorderableArchive(container)"
+                         @ondragstart="() => StartSidebarArchiveDrag(container)"
+                         @ondragend="ClearSidebarArchiveDrag"
+                         @ondragover:preventDefault="true"
+                         @ondrop="() => DropSidebarArchiveAsync(container)">
                         <button class="source-toggle @(hasChildren ? null : "hidden")" title="@(IsSourceCollapsed(container.Id) ? "Expand" : "Collapse")" disabled="@(!hasChildren)" @onclick="() => ToggleSourceCollapsed(container.Id)">
                             @(IsSourceCollapsed(container.Id) ? ">" : "v")
                         </button>
@@ -317,7 +325,7 @@
                     </div>
                 </div>
 
-                <ImageGrid Archives="_snapshot.Archives" Images="_snapshot.Images" OnOpen="OpenViewer" OnOpenArchive="OpenArchiveFromPreviewAsync" OnRate="RateOverviewAssetAsync" />
+                <ImageGrid Archives="_snapshot.Archives" Images="_snapshot.Images" OnOpen="OpenViewer" OnOpenArchive="OpenArchiveFromPreviewAsync" OnRate="RateOverviewAssetAsync" OnToggleArchiveIgnored="ToggleIgnoredAsync" OnChooseArchivePreview="OpenArchivePreviewPickerAsync" OnArchiveReorder="ReorderArchivesAsync" />
             </section>
             </section>
         }
@@ -394,6 +402,52 @@
     </div>
 }
 
+@if (_previewArchive is not null)
+{
+    <div class="confirm-overlay" role="dialog" aria-modal="true" aria-labelledby="preview-dialog-title">
+        <section class="confirm-dialog archive-preview-dialog">
+            <div class="panel-heading compact">
+                <div>
+                    <p class="eyebrow">Container preview</p>
+                    <h2 id="preview-dialog-title">@_previewArchive.DisplayName</h2>
+                    <p class="path dark">@_previewArchive.RelativePath</p>
+                </div>
+                <button class="icon-button" title="Close" @onclick="CloseArchivePreviewPicker">x</button>
+            </div>
+
+            @if (_isLoadingPreviewCandidates)
+            {
+                <div class="empty-state inline">
+                    <h2>Loading preview choices</h2>
+                </div>
+            }
+            else if (_previewCandidates.Count == 0)
+            {
+                <div class="empty-state inline">
+                    <h2>No image or video entries found</h2>
+                </div>
+            }
+            else
+            {
+                <div class="preview-picker-grid">
+                    @foreach (var candidate in _previewCandidates)
+                    {
+                        <button @key="candidate.Id" class="preview-choice" title="@candidate.DisplayName" @onclick="() => SetArchivePreviewAsync(candidate)">
+                            <Preview AssetId="candidate.PreviewImageId" AssetKind="candidate.PreviewKind" />
+                            <span>@candidate.DisplayName</span>
+                        </button>
+                    }
+                </div>
+            }
+
+            <div class="drawer-actions flush">
+                <button class="secondary-button" @onclick="ResetArchivePreviewAsync" disabled="@_isLoadingPreviewCandidates">Use automatic preview</button>
+                <button class="secondary-button" @onclick="CloseArchivePreviewPicker">Cancel</button>
+            </div>
+        </section>
+    </div>
+}
+
 @if (_editingAsset is not null)
 {
     <div class="drawer">
@@ -416,6 +470,14 @@
                 {
                     <img class="viewer-image" src="@ImageUrl(_editingAsset.PreviewImageId.Value)" alt="@_editingAsset.DisplayName" />
                 }
+            }
+
+            @if (_editingAsset.IsContainer)
+            {
+                <div class="drawer-actions flush">
+                    <button class="secondary-button" @onclick="() => OpenContainerPreviewPickerAsync(_editingAsset)">Change preview</button>
+                    <button class="secondary-button" @onclick="() => ResetContainerPreviewAsync(_editingAsset)">Use automatic preview</button>
+                </div>
             }
 
             <label class="field">
@@ -518,12 +580,20 @@
     private string? _scanConfirmationError;
     private bool _isArchiveScanning;
     private bool _isRefreshingArchivePreview;
+    private bool _isRefreshingRootScanSnapshot;
     private ScanProgress? _folderScanProgress;
     private ScanProgress? _archiveScanProgress;
+    private DateTimeOffset _lastRootScanRefresh = DateTimeOffset.MinValue;
+    private int _lastRootScanItemCount;
+    private long? _completedRootScanJobId;
     private DateTimeOffset _lastArchivePreviewRefresh = DateTimeOffset.MinValue;
     private int _lastArchivePreviewImageCount;
     private AssetCard? _editingAsset;
     private AssetCard? _groupingArchive;
+    private AssetCard? _previewArchive;
+    private List<AssetCard> _previewCandidates = [];
+    private bool _isLoadingPreviewCandidates;
+    private long? _draggingSidebarArchiveId;
     private string _newGroupName = string.Empty;
     private AssetCard? _viewerAsset;
     private string _editLabelName = string.Empty;
@@ -556,11 +626,15 @@
 
     private string LabelAffeButtonClass => _labelAffeMode ? "secondary-button active-mode" : "secondary-button";
 
-    private bool IsRootScanBusy => _isScanning || _pendingRootScan is not null || _isCountingScanArchives;
+    private bool IsRootScanBusy => _isScanning || RootScanQueue.Snapshot.IsBusy || _pendingRootScan is not null || _isCountingScanArchives;
 
     protected override async Task OnInitializedAsync()
     {
         await LoadAsync();
+        if (RootScanQueue.Snapshot.IsBusy)
+        {
+            StartRootScanMonitor();
+        }
     }
 
     private async Task ScanAsync()
@@ -621,10 +695,21 @@
             await ClearUiForRescanAsync();
         }
 
-        Func<IProgress<ScanProgress>, CancellationToken, Task<ScanSummary>> scanOperation = pending.IsRescan
-            ? (progress, cancellationToken) => Scanner.RescanAsync(progress, cancellationToken)
-            : (progress, cancellationToken) => Scanner.ScanAsync(progress, cancellationToken);
-        await RunRootScanAsync(pending.Status, scanOperation);
+        if (!RootScanQueue.TryEnqueue(pending.Status, pending.IsRescan))
+        {
+            _scanMessage = "A scan is already running.";
+            return;
+        }
+
+        _isScanning = true;
+        _scanStatus = pending.Status;
+        _scanMessage = null;
+        _lastScan = null;
+        _lastRootScanRefresh = DateTimeOffset.MinValue;
+        _lastRootScanItemCount = 0;
+        _folderScanProgress = new ScanProgress(pending.Status, Options.Value.RootPath, 0, 0, 0);
+        StartRootScanMonitor();
+        await RefreshRootScanStateAsync();
     }
 
     private void CancelPendingRootScan()
@@ -635,54 +720,73 @@
         _scanMessage = status is null ? null : $"{status} cancelled before starting.";
     }
 
-    private async Task RunRootScanAsync(string status, Func<IProgress<ScanProgress>, CancellationToken, Task<ScanSummary>> scanOperation)
+    private void StartRootScanMonitor()
     {
-        _isScanning = true;
-        _scanStatus = status;
-        _scanMessage = null;
-        _lastScan = null;
+        _rootScanCancellation?.Cancel();
         _rootScanCancellation?.Dispose();
         _rootScanCancellation = new CancellationTokenSource();
-        var cancellationToken = _rootScanCancellation.Token;
-        _folderScanProgress = new ScanProgress(status, Options.Value.RootPath, 0, 0, 0);
-        var progress = new Progress<ScanProgress>(value =>
-        {
-            _folderScanProgress = value;
-            _ = InvokeAsync(async () =>
-            {
-                if (value.Phase == "Fast scan complete")
-                {
-                    await LoadAsync();
-                    return;
-                }
+        _ = MonitorRootScanAsync(_rootScanCancellation.Token);
+    }
 
-                StateHasChanged();
-            });
-        });
-
+    private async Task MonitorRootScanAsync(CancellationToken cancellationToken)
+    {
         try
         {
-            _lastScan = await Task.Run(async () => await scanOperation(progress, cancellationToken), cancellationToken);
-            await LoadAsync();
+            using var timer = new PeriodicTimer(TimeSpan.FromMilliseconds(500));
+            await RefreshRootScanStateAsync();
+            while (await timer.WaitForNextTickAsync(cancellationToken))
+            {
+                await InvokeAsync(RefreshRootScanStateAsync);
+                if (!RootScanQueue.Snapshot.IsBusy)
+                {
+                    break;
+                }
+            }
         }
         catch (OperationCanceledException)
         {
-            _scanMessage = $"{status} cancelled.";
+        }
+    }
+
+    private async Task RefreshRootScanStateAsync()
+    {
+        var snapshot = RootScanQueue.Snapshot;
+        if (snapshot.IsBusy)
+        {
+            _isScanning = true;
+            _scanStatus = snapshot.Status;
+            _folderScanProgress = snapshot.Progress ?? new ScanProgress(snapshot.Status, Options.Value.RootPath, 0, 0, 0);
+
+            if (_folderScanProgress is { } progress && ShouldRefreshRootScanSnapshot(progress))
+            {
+                await RefreshRootScanSnapshotAsync();
+            }
+            else
+            {
+                StateHasChanged();
+            }
+
+            return;
+        }
+
+        if (snapshot.JobId is not null && snapshot.JobId != _completedRootScanJobId)
+        {
+            _completedRootScanJobId = snapshot.JobId;
+            _lastScan = snapshot.Summary;
+            _scanMessage = snapshot.Message;
             await LoadAsync();
         }
-        finally
-        {
-            _isScanning = false;
-            _folderScanProgress = null;
-            _rootScanCancellation?.Dispose();
-            _rootScanCancellation = null;
-        }
+
+        _isScanning = false;
+        _isRefreshingRootScanSnapshot = false;
+        _folderScanProgress = null;
+        StateHasChanged();
     }
 
     private void CancelRootScan()
     {
         _scanStatus = "Cancelling";
-        _rootScanCancellation?.Cancel();
+        RootScanQueue.Cancel();
     }
 
     private async Task LoadAsync(long? activeContainerId = null)
@@ -806,6 +910,9 @@
         _folderScanProgress = null;
         _archiveScanProgress = null;
         _isArchiveScanning = false;
+        _isRefreshingRootScanSnapshot = false;
+        _lastRootScanRefresh = DateTimeOffset.MinValue;
+        _lastRootScanItemCount = 0;
         _lastArchivePreviewRefresh = DateTimeOffset.MinValue;
         _lastArchivePreviewImageCount = 0;
         _scanMessage = "Cleared current view. Starting rescan.";
@@ -833,6 +940,53 @@
         _lastArchivePreviewImageCount = progress.Images;
         _lastArchivePreviewRefresh = now;
         return true;
+    }
+
+    private bool ShouldRefreshRootScanSnapshot(ScanProgress progress)
+    {
+        if (progress.Phase is not ("Scanning folders" or
+            "Scanning loose media" or
+            "Found archive" or
+            "Archive quick scan complete" or
+            "Reused archive preview" or
+            "Found archive preview"))
+        {
+            return false;
+        }
+
+        var itemCount = progress.Images + progress.Containers;
+        if (itemCount <= _lastRootScanItemCount)
+        {
+            return false;
+        }
+
+        var now = DateTimeOffset.UtcNow;
+        if (itemCount > 1 && now - _lastRootScanRefresh < TimeSpan.FromMilliseconds(700))
+        {
+            return false;
+        }
+
+        _lastRootScanItemCount = itemCount;
+        _lastRootScanRefresh = now;
+        return true;
+    }
+
+    private async Task RefreshRootScanSnapshotAsync()
+    {
+        if (_isRefreshingRootScanSnapshot)
+        {
+            return;
+        }
+
+        _isRefreshingRootScanSnapshot = true;
+        try
+        {
+            await LoadAsync();
+        }
+        finally
+        {
+            _isRefreshingRootScanSnapshot = false;
+        }
     }
 
     private async Task RefreshArchivePreviewAsync()
@@ -1536,8 +1690,17 @@
         }
 
         await Library.SaveMetadataAsync(_editingAsset.Id, _editLabelName, _editDescription, _editTags, _editRating);
-        _editingAsset = await Library.GetAssetAsync(_editingAsset.Id);
-        if (_viewerAsset?.Id == _editingAsset?.Id)
+        var editedId = _editingAsset.Id;
+        if (_editingAsset.IsContainer)
+        {
+            await RefreshEditedAssetAsync(editedId);
+        }
+        else
+        {
+            _editingAsset = await Library.GetAssetAsync(editedId);
+        }
+
+        if (_viewerAsset?.Id == editedId)
         {
             _viewerAsset = _editingAsset;
         }
@@ -1561,6 +1724,192 @@
         await LoadAsync();
     }
 
+    private async Task ReorderArchivesAsync(IReadOnlyList<long> archiveIds)
+    {
+        await ApplyArchiveOrderAsync(archiveIds);
+        await LoadAsync();
+    }
+
+    private async Task ApplyArchiveOrderAsync(IReadOnlyList<long> archiveIds)
+    {
+        await Library.SaveArchiveDisplayOrderAsync(archiveIds);
+        if (_snapshot is not null)
+        {
+            var archiveById = _snapshot.Archives.ToDictionary(archive => archive.Id);
+            var orderedArchives = archiveIds
+                .Where(archiveById.ContainsKey)
+                .Select((id, index) => archiveById[id] with { DisplayOrder = index })
+                .Concat(_snapshot.Archives.Where(archive => !archiveIds.Contains(archive.Id)))
+                .ToList();
+            var orderById = archiveIds
+                .Select((id, index) => new { id, index })
+                .ToDictionary(item => item.id, item => item.index);
+
+            _snapshot = _snapshot with
+            {
+                Archives = orderedArchives,
+                Containers = _snapshot.Containers
+                    .Select(container => orderById.TryGetValue(container.Id, out var index)
+                        ? container with { DisplayOrder = index }
+                        : container)
+                    .ToList()
+            };
+        }
+    }
+
+    private async Task OpenArchivePreviewPickerAsync(AssetCard archive)
+    {
+        await OpenContainerPreviewPickerAsync(archive);
+    }
+
+    private async Task OpenContainerPreviewPickerAsync(AssetCard container)
+    {
+        if (!container.IsContainer)
+        {
+            return;
+        }
+
+        _previewArchive = container;
+        _previewCandidates = [];
+        _isLoadingPreviewCandidates = true;
+        await InvokeAsync(StateHasChanged);
+
+        var activeContainerId = _snapshot?.ActiveContainerId;
+        try
+        {
+            if (container.Kind == AssetKinds.Zip && ShouldScanArchive(container))
+            {
+                await Task.Run(() => Scanner.ScanContainerAsync(container.Id));
+            }
+
+            _previewCandidates = (await Library.GetTabImagesAsync(container.Id, string.Empty, null, false))
+                .Where(asset => asset.IsImage || asset.IsVideo)
+                .ToList();
+            _snapshot = await Library.GetSnapshotAsync(activeContainerId, _search, SelectedRating, _unratedOnly);
+        }
+        finally
+        {
+            _isLoadingPreviewCandidates = false;
+        }
+    }
+
+    private void CloseArchivePreviewPicker()
+    {
+        _previewArchive = null;
+        _previewCandidates = [];
+        _isLoadingPreviewCandidates = false;
+    }
+
+    private async Task SetArchivePreviewAsync(AssetCard candidate)
+    {
+        if (_previewArchive is null)
+        {
+            return;
+        }
+
+        await Library.SetContainerPreviewAsync(_previewArchive.Id, candidate.Id);
+        await RefreshEditedAssetAsync(_previewArchive.Id);
+        CloseArchivePreviewPicker();
+        await LoadAsync();
+    }
+
+    private async Task ResetArchivePreviewAsync()
+    {
+        if (_previewArchive is null)
+        {
+            return;
+        }
+
+        await ResetContainerPreviewAsync(_previewArchive);
+        CloseArchivePreviewPicker();
+    }
+
+    private async Task ResetContainerPreviewAsync(AssetCard container)
+    {
+        if (!container.IsContainer)
+        {
+            return;
+        }
+
+        await Library.SetContainerPreviewAsync(container.Id, null);
+        await RefreshEditedAssetAsync(container.Id);
+        await LoadAsync();
+    }
+
+    private async Task RefreshEditedAssetAsync(long id)
+    {
+        if (_editingAsset?.Id != id)
+        {
+            return;
+        }
+
+        var activeContainerId = _snapshot?.ActiveContainerId;
+        _snapshot = await Library.GetSnapshotAsync(activeContainerId, _search, SelectedRating, _unratedOnly);
+        _editingAsset = _snapshot.Containers
+            .Concat(_snapshot.Archives)
+            .Concat(_snapshot.Images)
+            .FirstOrDefault(asset => asset.Id == id) ?? await Library.GetAssetAsync(id);
+    }
+
+    private static bool IsReorderableArchive(AssetCard container)
+    {
+        return container.Kind == AssetKinds.Zip;
+    }
+
+    private string SourceTreeRowClass(AssetCard container)
+    {
+        return _draggingSidebarArchiveId == container.Id
+            ? "source-tree-row dragging"
+            : "source-tree-row";
+    }
+
+    private void StartSidebarArchiveDrag(AssetCard archive)
+    {
+        if (IsReorderableArchive(archive))
+        {
+            _draggingSidebarArchiveId = archive.Id;
+        }
+    }
+
+    private void ClearSidebarArchiveDrag()
+    {
+        _draggingSidebarArchiveId = null;
+    }
+
+    private async Task DropSidebarArchiveAsync(AssetCard targetArchive)
+    {
+        if (!IsReorderableArchive(targetArchive) ||
+            _draggingSidebarArchiveId is not { } sourceArchiveId ||
+            sourceArchiveId == targetArchive.Id)
+        {
+            ClearSidebarArchiveDrag();
+            return;
+        }
+
+        var orderedIds = VisibleContainers()
+            .Where(IsReorderableArchive)
+            .Select(container => container.Id)
+            .ToList();
+        var sourceIndex = orderedIds.IndexOf(sourceArchiveId);
+        var targetIndex = orderedIds.IndexOf(targetArchive.Id);
+        if (sourceIndex < 0 || targetIndex < 0)
+        {
+            ClearSidebarArchiveDrag();
+            return;
+        }
+
+        orderedIds.RemoveAt(sourceIndex);
+        if (sourceIndex < targetIndex)
+        {
+            targetIndex--;
+        }
+
+        orderedIds.Insert(targetIndex, sourceArchiveId);
+        ClearSidebarArchiveDrag();
+        await ApplyArchiveOrderAsync(orderedIds);
+        await LoadAsync();
+    }
+
     private int? SelectedRating => int.TryParse(_ratingFilter, out var rating) ? rating : null;
 
     private static string ImageUrl(long id) => $"/api/assets/{id}/content";
@@ -1579,12 +1928,67 @@
         }
 
         var byId = _snapshot.Containers.ToDictionary(container => container.Id);
+        var sourceTree = SourceTreeContainers().ToList();
         if (_showArchivesOnly)
         {
-            return _snapshot.Containers.Where(container => container.Kind == AssetKinds.Zip || container.SourceType == AssetSourceTypes.ArchiveGroup);
+            return sourceTree.Where(container => container.Kind == AssetKinds.Zip || container.SourceType == AssetSourceTypes.ArchiveGroup);
         }
 
-        return _snapshot.Containers.Where(container => IsSourceVisible(container, byId));
+        return sourceTree.Where(container => IsSourceVisible(container, byId));
+    }
+
+    private IEnumerable<AssetCard> SourceTreeContainers()
+    {
+        if (_snapshot is null)
+        {
+            yield break;
+        }
+
+        var childrenByParent = _snapshot.Containers
+            .OrderBy(SourceSortKey, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(container => container.DisplayName, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(container => container.Id)
+            .ToLookup(container => container.ParentId);
+        var emitted = new HashSet<long>();
+
+        foreach (var root in childrenByParent[null])
+        {
+            foreach (var container in SourceTreeContainers(root, childrenByParent, emitted))
+            {
+                yield return container;
+            }
+        }
+
+        foreach (var orphan in _snapshot.Containers
+            .Where(container => !emitted.Contains(container.Id))
+            .OrderBy(SourceSortKey, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(container => container.Id))
+        {
+            yield return orphan;
+        }
+    }
+
+    private static IEnumerable<AssetCard> SourceTreeContainers(
+        AssetCard root,
+        ILookup<long?, AssetCard> childrenByParent,
+        HashSet<long> emitted)
+    {
+        emitted.Add(root.Id);
+        yield return root;
+
+        foreach (var child in childrenByParent[root.Id])
+        {
+            foreach (var descendant in SourceTreeContainers(child, childrenByParent, emitted))
+            {
+                yield return descendant;
+            }
+        }
+    }
+
+    private static string SourceSortKey(AssetCard asset)
+    {
+        var fallback = string.IsNullOrWhiteSpace(asset.RelativePath) ? asset.DisplayName : asset.RelativePath;
+        return $"{asset.DisplayOrder.GetValueOrDefault(int.MaxValue):D10}:{fallback}";
     }
 
     private bool IsSourceVisible(AssetCard container, Dictionary<long, AssetCard> byId)

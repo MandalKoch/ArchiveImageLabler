@@ -220,7 +220,6 @@ public sealed class LibraryScanner(
         parent.ScanError = null;
 
         var assets = await db.Assets.ToDictionaryAsync(asset => asset.StableKey, cancellationToken);
-        MarkArchiveDescendantsUnavailable(assets.Values, parent.StableKey);
 
         if (parent.IsIgnored)
         {
@@ -228,6 +227,8 @@ public sealed class LibraryScanner(
             progress?.Report(new ScanProgress("Archive ignored", parent.RelativePath, 0, 0, 0));
             return new ScanSummary();
         }
+
+        MarkArchiveDescendantsUnavailable(assets.Values, parent.StableKey);
 
         var summary = new ScanSummary();
         var entryChain = string.IsNullOrWhiteSpace(parent.EntryChain)
@@ -522,13 +523,11 @@ public sealed class LibraryScanner(
             }
 
             var relativePath = Path.GetRelativePath(rootPath, filePath);
-            progress?.Report(new ScanProgress("Fingerprinting archive", relativePath, 0, 0, 0));
+            progress?.Report(new ScanProgress("Queued archive", relativePath, 0, 0, 0));
 
             try
             {
-                var stableKey = await CreateArchiveStableKeyAsync(file, cancellationToken);
                 discovery.ArchiveFiles.Add(new DiscoveredArchiveFile(
-                    stableKey,
                     parent.StableKey,
                     file.Name,
                     file.FullName,
@@ -536,12 +535,11 @@ public sealed class LibraryScanner(
                     file.Length,
                     file.LastWriteTimeUtc,
                     parent.Depth + 1));
-                progress?.Report(new ScanProgress("Discovered archive", relativePath, 0, 0, 0));
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
             {
-                discovery.FileErrors.Add(new FileScanError(file.FullName, relativePath, "Unable to read archive"));
-                logger.LogWarning(ex, "Unable to fingerprint archive {ArchivePath}", file.FullName);
+                discovery.FileErrors.Add(new FileScanError(file.FullName, relativePath, "Unable to inspect archive metadata"));
+                logger.LogWarning(ex, "Unable to inspect archive metadata {ArchivePath}", file.FullName);
             }
         }
     }
@@ -639,6 +637,8 @@ public sealed class LibraryScanner(
             await FlushScanBatchAsync(db, summary, SaveBatchSize, cancellationToken);
         }
 
+        await db.SaveChangesAsync(cancellationToken);
+
         var archiveFiles = discovery.ArchiveFiles
             .OrderBy(file => file.RelativePath, StringComparer.Ordinal)
             .ToList();
@@ -667,7 +667,7 @@ public sealed class LibraryScanner(
             }
 
             progress?.Report(new ScanProgress(
-                "Quick scanning archives",
+                "Fingerprinting archive",
                 archiveFile.RelativePath,
                 summary.Images,
                 summary.Containers,
@@ -676,7 +676,29 @@ public sealed class LibraryScanner(
                 archiveTotal,
                 "archives"));
 
-            if (assets.TryGetValue(archiveFile.StableKey, out var existingZipAsset) && existingZipAsset.IsAvailable)
+            string stableKey;
+            try
+            {
+                stableKey = await CreateArchiveStableKeyAsync(new FileInfo(archiveFile.FullPath), cancellationToken);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                summary.Errors++;
+                scannedArchives++;
+                logger.LogWarning(ex, "Unable to fingerprint archive {ArchivePath}", archiveFile.FullPath);
+                progress?.Report(new ScanProgress(
+                    "Unable to read archive",
+                    archiveFile.RelativePath,
+                    summary.Images,
+                    summary.Containers,
+                    summary.Errors,
+                    scannedArchives,
+                    archiveTotal,
+                    "archives"));
+                continue;
+            }
+
+            if (assets.TryGetValue(stableKey, out var existingZipAsset) && existingZipAsset.IsAvailable)
             {
                 scannedArchives++;
                 progress?.Report(new ScanProgress(
@@ -691,7 +713,7 @@ public sealed class LibraryScanner(
                 continue;
             }
 
-            assets.TryGetValue(archiveFile.StableKey, out var previousArchiveAsset);
+            assets.TryGetValue(stableKey, out var previousArchiveAsset);
             var previousArchiveSourcePath = previousArchiveAsset?.SourcePath;
             var previousArchiveRelativePath = previousArchiveAsset?.RelativePath;
             var archiveParentForUpsert = archiveParent;
@@ -707,7 +729,7 @@ public sealed class LibraryScanner(
             var zipAsset = Upsert(
                 db,
                 assets,
-                stableKey: archiveFile.StableKey,
+                stableKey: stableKey,
                 parent: archiveParentForUpsert,
                 name: archiveFile.Name,
                 kind: AssetKinds.Zip,
@@ -727,10 +749,10 @@ public sealed class LibraryScanner(
                 UpdateArchiveDescendantPaths(assets.Values, zipAsset.StableKey, zipAsset.SourcePath, previousArchiveRelativePath, zipAsset.RelativePath);
             }
 
+            await db.SaveChangesAsync(cancellationToken);
             progress?.Report(new ScanProgress("Found archive", zipAsset.RelativePath, summary.Images, summary.Containers, summary.Errors));
             if (zipAsset.IsIgnored)
             {
-                MarkArchiveDescendantsUnavailable(assets.Values, zipAsset.StableKey);
                 progress?.Report(new ScanProgress(
                     "Skipped ignored archive",
                     zipAsset.RelativePath,
@@ -873,7 +895,6 @@ public sealed class LibraryScanner(
 
                 if (nestedZip.IsIgnored)
                 {
-                    MarkArchiveDescendantsUnavailable(assets.Values, nestedZip.StableKey);
                     progress?.Report(new ScanProgress("Skipped ignored nested archive", relativePath, summary.Images, summary.Containers, summary.Errors));
                     continue;
                 }
@@ -1390,7 +1411,6 @@ internal sealed record DiscoveredMediaFile(
     int Depth);
 
 internal sealed record DiscoveredArchiveFile(
-    string StableKey,
     string ParentStableKey,
     string Name,
     string FullPath,

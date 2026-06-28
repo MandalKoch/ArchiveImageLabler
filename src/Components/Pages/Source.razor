@@ -2,6 +2,7 @@
 @rendermode InteractiveServer
 @inject LibraryScanner Scanner
 @inject LibraryQueries Library
+@inject SourceExtractionCache SourceExtractionCache
 @inject IJSRuntime JsRuntime
 @implements IAsyncDisposable
 
@@ -17,6 +18,7 @@
 
         <div class="toolbar">
             <MemoryUsage />
+            <StorageUsage />
             <a class="secondary-button" href="/">Library</a>
             @if (_source is not null)
             {
@@ -59,6 +61,19 @@
         </section>
     }
 
+    @if (_isExtractingSource && _sourceExtractionProgress is not null)
+    {
+        <section class="progress-panel">
+            <div>
+                <strong>@_sourceExtractionProgress.Phase</strong>
+                <span>@_sourceExtractionProgress.CurrentItem</span>
+            </div>
+            <div class="progress-bar determinate"><span style="@ExtractionProgressBarStyle()"></span></div>
+            <div class="progress-count">@ExtractionProgressText()</div>
+            <small>@DisplayImages.Count media files ready · @_images.Count indexed</small>
+        </section>
+    }
+
     <section class="filters">
         <input placeholder="Search labels, names, tags, descriptions" @bind="_search" @bind:event="oninput" />
         <select @bind="_ratingFilter">
@@ -96,7 +111,7 @@
         }
         else
         {
-            <ImageGrid Images="_images" OnOpen="OpenViewer" />
+            <ImageGrid Images="DisplayImages" OnOpen="OpenViewer" MediaUrlForAsset="MediaUrl" />
         }
     </section>
 </div>
@@ -185,7 +200,7 @@
                 </div>
             </header>
             <div class="viewer-stage">
-                @ViewerMedia(_viewerAsset)
+                @ViewerMedia(_viewerAsset, MediaUrl)
             </div>
             <footer class="viewer-filmstrip">
                 <div class="viewer-meta-line">
@@ -197,10 +212,10 @@
                     }
                 </div>
                 <div class="filmstrip-row">
-                    @foreach (var image in _images)
+                    @foreach (var image in DisplayImages)
                     {
                         <button @key="image.Id" class="filmstrip-item @(image.Id == _viewerAsset.Id ? "active" : null)" title="@image.DisplayName" @onclick="() => ShowViewerImageAsync(image)">
-                            @FilmstripMedia(image)
+                            @FilmstripMedia(image, MediaUrl)
                         </button>
                     }
                 </div>
@@ -226,6 +241,12 @@
     private int _lastArchivePreviewImageCount;
     private AssetCard? _editingAsset;
     private AssetCard? _viewerAsset;
+    private string? _extractionSessionId;
+    private bool _isExtractingSource;
+    private SourceExtractionProgress? _sourceExtractionProgress;
+    private readonly HashSet<long> _extractedImageIds = [];
+    private CancellationTokenSource? _sourceExtractionCancellation;
+    private Task? _sourceExtractionTask;
     private string _editLabelName = string.Empty;
     private string _editDescription = string.Empty;
     private string _editTags = string.Empty;
@@ -234,6 +255,10 @@
     private bool _keyboardConnected;
     private long? _loadedContainerId;
     private CancellationTokenSource? _archiveScanCancellation;
+
+    private List<AssetCard> DisplayImages => _source is { Kind: AssetKinds.Zip } && (_isExtractingSource || _extractionSessionId is not null)
+        ? _images.Where(image => _extractedImageIds.Contains(image.Id)).ToList()
+        : _images;
 
     protected override async Task OnParametersSetAsync()
     {
@@ -253,9 +278,18 @@
 
     private async Task LoadAsync()
     {
+        await LoadAsync(startExtraction: true);
+    }
+
+    private async Task LoadAsync(bool startExtraction)
+    {
         var snapshot = await Library.GetSnapshotAsync(ContainerId, _search, SelectedRating, _unratedOnly);
         _source = snapshot.Containers.SingleOrDefault(container => container.Id == ContainerId);
         _images = snapshot.Images;
+        if (startExtraction && _source is { Kind: AssetKinds.Zip, IsIgnored: false } source && !ShouldScanArchive(source))
+        {
+            await StartExtractionAsync();
+        }
     }
 
     private async Task ScanArchiveAsync()
@@ -290,11 +324,9 @@
         try
         {
             await Task.Run(() => Scanner.ScanContainerAsync(ContainerId, progress, cancellationToken), cancellationToken);
-            await LoadAsync();
         }
         catch (OperationCanceledException)
         {
-            await LoadAsync();
         }
         finally
         {
@@ -303,6 +335,8 @@
             _archiveScanCancellation?.Dispose();
             _archiveScanCancellation = null;
         }
+
+        await LoadAsync();
     }
 
     private void CancelArchiveScan()
@@ -341,7 +375,7 @@
         _isRefreshingArchivePreview = true;
         try
         {
-            await LoadAsync();
+            await LoadAsync(startExtraction: false);
         }
         finally
         {
@@ -400,14 +434,15 @@
             return;
         }
 
-        var index = _images.FindIndex(image => image.Id == _viewerAsset.Id);
-        if (index < 0 || _images.Count == 0)
+        var images = DisplayImages;
+        var index = images.FindIndex(image => image.Id == _viewerAsset.Id);
+        if (index < 0 || images.Count == 0)
         {
             return;
         }
 
-        var nextIndex = (index + direction + _images.Count) % _images.Count;
-        _viewerAsset = _images[nextIndex];
+        var nextIndex = (index + direction + images.Count) % images.Count;
+        _viewerAsset = images[nextIndex];
     }
 
     private async Task ClearLoadedImagesAsync()
@@ -417,9 +452,15 @@
             await CloseViewer();
         }
 
+        await StopExtractionAsync();
+        await SourceExtractionCache.DeleteSessionAsync(_extractionSessionId);
         _editingAsset = null;
         _source = null;
         _images = [];
+        _extractionSessionId = null;
+        _sourceExtractionProgress = null;
+        _extractedImageIds.Clear();
+        _isExtractingSource = false;
         await InvokeAsync(StateHasChanged);
     }
 
@@ -521,7 +562,117 @@
 
     private int? SelectedRating => int.TryParse(_ratingFilter, out var rating) ? rating : null;
 
-    private static string ImageUrl(long id) => $"/api/assets/{id}/content";
+    private string ImageUrl(long id) => MediaUrl(id);
+
+    private string MediaUrl(long id)
+    {
+        return _extractionSessionId is null
+            ? $"/api/assets/{id}/content"
+            : $"/api/source-cache/{_extractionSessionId}/{id}";
+    }
+
+    private async Task StartExtractionAsync()
+    {
+        if (_source is not { Kind: AssetKinds.Zip } || _images.Count == 0)
+        {
+            return;
+        }
+
+        await StopExtractionAsync();
+        await SourceExtractionCache.DeleteSessionAsync(_extractionSessionId);
+        _extractionSessionId = null;
+        _sourceExtractionProgress = null;
+        _extractedImageIds.Clear();
+        _isExtractingSource = true;
+        _sourceExtractionCancellation = new CancellationTokenSource();
+
+        var progress = new Progress<SourceExtractionProgress>(value =>
+        {
+            _ = InvokeAsync(() =>
+            {
+                _extractionSessionId = value.SessionId;
+                _sourceExtractionProgress = value;
+                if (value.AssetId is long assetId)
+                {
+                    _extractedImageIds.Add(assetId);
+                }
+
+                StateHasChanged();
+            });
+        });
+
+        _sourceExtractionTask = ExtractSourceAsync(progress, _sourceExtractionCancellation.Token);
+        await InvokeAsync(StateHasChanged);
+    }
+
+    private async Task ExtractSourceAsync(IProgress<SourceExtractionProgress> progress, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var summary = await SourceExtractionCache.ExtractAsync(ContainerId, _images.Select(image => image.Id).ToArray(), progress, cancellationToken);
+            _extractionSessionId = summary.FileCount > 0 ? summary.SessionId : null;
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        finally
+        {
+            await InvokeAsync(() =>
+            {
+                _isExtractingSource = false;
+                StateHasChanged();
+            });
+        }
+    }
+
+    private async Task StopExtractionAsync()
+    {
+        if (_sourceExtractionCancellation is null)
+        {
+            return;
+        }
+
+        await _sourceExtractionCancellation.CancelAsync();
+        if (_sourceExtractionTask is not null)
+        {
+            try
+            {
+                await _sourceExtractionTask;
+            }
+            catch (OperationCanceledException)
+            {
+            }
+        }
+
+        _sourceExtractionCancellation.Dispose();
+        _sourceExtractionCancellation = null;
+        _sourceExtractionTask = null;
+        _isExtractingSource = false;
+    }
+
+    private string ExtractionProgressText()
+    {
+        if (_sourceExtractionProgress is not { Total: > 0 } progress)
+        {
+            return string.Empty;
+        }
+
+        var extracted = Math.Clamp(progress.Extracted, 0, progress.Total);
+        var percent = extracted * 100d / progress.Total;
+        return $"{extracted} of {progress.Total} files unpacked ({percent:0.#}%)";
+    }
+
+    private string ExtractionProgressBarStyle()
+    {
+        if (_sourceExtractionProgress is not { Total: > 0 } progress)
+        {
+            return "--progress-value: 0%";
+        }
+
+        var extracted = Math.Clamp(progress.Extracted, 0, progress.Total);
+        var percent = extracted * 100d / progress.Total;
+        return $"--progress-value: {percent:0.##}%";
+    }
 
     private static string Stars(int? rating) => rating is null ? "Unrated" : new string('*', rating.Value);
 
@@ -550,12 +701,12 @@
         };
     }
 
-    private static RenderFragment ViewerMedia(AssetCard asset) => builder =>
+    private static RenderFragment ViewerMedia(AssetCard asset, Func<long, string> mediaUrl) => builder =>
     {
         if (asset.IsVideo)
         {
             builder.OpenElement(0, "video");
-            builder.AddAttribute(1, "src", ImageUrl(asset.Id));
+            builder.AddAttribute(1, "src", mediaUrl(asset.Id));
             builder.AddAttribute(2, "controls", true);
             builder.AddAttribute(3, "preload", "metadata");
             builder.AddAttribute(4, "autoplay", true);
@@ -573,7 +724,7 @@
             builder.AddContent(9, "AUD");
             builder.CloseElement();
             builder.OpenElement(10, "audio");
-            builder.AddAttribute(11, "src", ImageUrl(asset.Id));
+            builder.AddAttribute(11, "src", mediaUrl(asset.Id));
             builder.AddAttribute(12, "controls", true);
             builder.AddAttribute(13, "preload", "metadata");
             builder.AddAttribute(14, "autoplay", true);
@@ -583,17 +734,17 @@
         }
 
         builder.OpenElement(15, "img");
-        builder.AddAttribute(16, "src", ImageUrl(asset.Id));
+        builder.AddAttribute(16, "src", mediaUrl(asset.Id));
         builder.AddAttribute(17, "alt", asset.DisplayName);
         builder.CloseElement();
     };
 
-    private static RenderFragment FilmstripMedia(AssetCard asset) => builder =>
+    private static RenderFragment FilmstripMedia(AssetCard asset, Func<long, string> mediaUrl) => builder =>
     {
         if (asset.IsImage)
         {
             builder.OpenElement(0, "img");
-            builder.AddAttribute(1, "src", ImageUrl(asset.Id));
+            builder.AddAttribute(1, "src", mediaUrl(asset.Id));
             builder.AddAttribute(2, "alt", asset.DisplayName);
             builder.CloseElement();
             return;
@@ -602,7 +753,7 @@
         if (asset.IsVideo)
         {
             builder.OpenElement(3, "video");
-            builder.AddAttribute(4, "src", $"{ImageUrl(asset.Id)}#t=0.1");
+            builder.AddAttribute(4, "src", $"{mediaUrl(asset.Id)}#t=0.1");
             builder.AddAttribute(5, "preload", "metadata");
             builder.AddAttribute(6, "muted", true);
             builder.AddAttribute(7, "playsinline", true);
@@ -694,5 +845,7 @@
         _keyboardReference?.Dispose();
         _archiveScanCancellation?.Cancel();
         _archiveScanCancellation?.Dispose();
+        await StopExtractionAsync();
+        await SourceExtractionCache.DeleteSessionAsync(_extractionSessionId);
     }
 }

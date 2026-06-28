@@ -2,7 +2,7 @@
 
 ArchiveImageLabler is a local-first media library for large folders that contain loose images, audio, videos, zip/rar archives, archive folders, and archives inside other archives. It runs as a Dockerized .NET 10 Blazor app, opens in your browser at `localhost`, and keeps your original media folder mounted read-only.
 
-The app is built for browsing first: scan a mounted folder, see previews immediately, open sources as pages, view images larger, play audio/video, and add your own tags, descriptions, and 1-5 star ratings.
+The app is built for browsing first: scan a mounted folder, see previews immediately as archives are discovered, open sources as pages, view images larger, play audio/video, and add your own tags, descriptions, and 1-5 star ratings.
 
 ## What It Does
 
@@ -13,14 +13,18 @@ The app is built for browsing first: scan a mounted folder, see previews immedia
 - Browses media inside nested archives with a default depth limit of `3`.
 - Preserves folder structure inside archives, including `archive!folder/folder/image.jpg` and `archive!folder/folder/inner.zip`.
 - Shows representative previews for folders and archives.
+- Lets you choose custom preview images for archives, groups, and folders.
 - Opens folders, archives, nested archive folders, and nested archives as their own pages.
-- Lets you ignore archive and nested archive sources so future scans skip loading them.
+- Opens archive Source pages immediately, then unpacks media to temporary app-data cache with a progress bar and loads each image as soon as it is ready.
+- Lets you ignore archive and nested archive sources so future scans skip loading them while their existing preview remains visible.
+- Lets you reorder archive cards and sidebar archive rows by drag and drop.
 - Stores metadata in SQLite:
   - Tags
   - Description
   - Optional 1-5 star rating
 - Filters by search text, rating, and unrated items.
 - Shows live app memory usage in the header while browsing or scanning.
+- Shows app-data and temporary cache disk usage in the header.
 - Keeps the mounted source library read-only.
 
 ## Runtime Model
@@ -30,9 +34,9 @@ Docker Compose is the main runtime path.
 The Compose file stays in the repository root. The Dockerfile lives next to the Blazor app code at [src/Dockerfile](src/Dockerfile), while the Docker build context remains the repository root so project references such as [servicedefaults](servicedefaults) are available during publish.
 
 ```text
-Host folder       Docker container
-./library   ->    /library        read-only media library
-./library/.archiveimagelabler -> /app/data SQLite database and app keys
+Host folder configured by .env       Docker container
+ARCHIVEIMAGELABLER_LIBRARY_PATH  ->  /library   read-only media library
+ARCHIVEIMAGELABLER_DATA_PATH     ->  /app/data  SQLite, app keys, temp cache
 ```
 
 SQLite is stored at:
@@ -75,7 +79,9 @@ http://localhost:5080
 
 6. Click `Scan`.
 
-`Scan` performs a lazy maintenance pass: it refreshes folders and loose media, keeps or creates one archive preview where needed, skips full archive depth scans, and prunes entries that are no longer available. Opening an archive page is what performs the deeper archive scan. `Rescan` clears the current UI, deletes indexed assets from SQLite, runs a fresh lazy scan, and releases currently held UI references before scanning starts.
+`Scan` performs a lazy maintenance pass: it refreshes folders and loose media, queues archive work in the background, adds each discovered archive as soon as it is indexed, and prunes entries that are no longer available. Opening an archive page performs the deeper archive scan when needed. `Rescan` clears the current UI, deletes indexed assets from SQLite, runs a fresh lazy scan, and releases currently held UI references before scanning starts.
+
+Archive Source pages render before media extraction is complete. For archive sources, the page creates a temporary extraction session under `/app/data/cache/source-pages`, shows unpack progress, and displays media as each file is ready. The temporary session is deleted when the Source page is closed or replaced.
 
 ## Local Development
 

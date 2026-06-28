@@ -3,7 +3,6 @@
 ## Browsing and Indexing
 
 - Incremental rescans based on file timestamps and sizes.
-- Better representative preview selection for folders and archives.
 - Persisted last selected source and source-page history.
 - Sorting controls for name, date, rating, size, and source type.
 - Pagination or virtualization for very large folders and archives.
@@ -18,7 +17,6 @@
 - Saved filter presets.
 - Import/export metadata as JSON.
 - Duplicate detection by file hash or perceptual hash.
-- Bulk ignore/unignore for zip sources.
 - Read metadata from EXIF, IPTC, and XMP.
 
 ## Search and Filtering

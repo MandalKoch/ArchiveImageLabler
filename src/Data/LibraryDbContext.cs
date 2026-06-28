@@ -18,6 +18,8 @@ public sealed class LibraryDbContext(DbContextOptions<LibraryDbContext> options)
             entity.HasIndex(asset => asset.IsAvailable);
             entity.HasIndex(asset => asset.IsIgnored);
             entity.HasIndex(asset => asset.SortKey);
+            entity.HasIndex(asset => asset.DisplayOrder);
+            entity.HasIndex(asset => asset.PreviewAssetId);
             entity.HasOne(asset => asset.Parent)
                 .WithMany(asset => asset.Children)
                 .HasForeignKey(asset => asset.ParentId)
